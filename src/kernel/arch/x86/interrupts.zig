@@ -33,6 +33,8 @@ export fn commonStub() callconv(.Naked) void {
         \\push  %%fs
         \\push  %%gs
         \\push  %%ss
+        \\mov %%cr3, %%eax
+        \\push %%eax
         \\mov   $0x10, %%ax
         \\mov   %%ax, %%ds
         \\mov   %%ax, %%es
@@ -42,6 +44,16 @@ export fn commonStub() callconv(.Naked) void {
         \\push  %%eax
         \\call  handler
         \\mov   %%eax, %%esp
+    );
+    // Pop off the new cr3 then check if it's the same as the previous cr3
+    // If so don't change cr3 to avoid a TLB flush
+    asm volatile (
+        \\pop %%eax
+        \\mov %%cr3, %%ebx
+        \\cmp %%eax, %%ebx
+        \\je same_cr3
+        \\mov %%eax, %%cr3
+        \\same_cr3:
         \\pop   %%ss
         \\pop   %%gs
         \\pop   %%fs

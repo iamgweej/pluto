@@ -46,6 +46,8 @@ extern var KERNEL_STACK_END: *u32;
 /// The interrupt context that is given to a interrupt handler. It contains most of the registers
 /// and the interrupt number and error code (if there is one).
 pub const CpuState = packed struct {
+    // Page directory
+    cr3: usize,
     // Extra segments
     ss: u32,
     gs: u32,
@@ -468,6 +470,7 @@ pub fn initTaskStack(entry_point: usize, allocator: *Allocator) Allocator.Error!
     // TODO Will need to add the exit point
     // Set up everything as a kernel task
     var stack = try allocator.alloc(u32, STACK_SIZE);
+    stack[STACK_SIZE - 19] = mem.virtToPhys(@ptrToInt(&paging.kernel_directory));
     stack[STACK_SIZE - 18] = gdt.KERNEL_DATA_OFFSET; // ss
     stack[STACK_SIZE - 17] = gdt.KERNEL_DATA_OFFSET; // gs
     stack[STACK_SIZE - 16] = gdt.KERNEL_DATA_OFFSET; // fs
@@ -492,7 +495,7 @@ pub fn initTaskStack(entry_point: usize, allocator: *Allocator) Allocator.Error!
     stack[STACK_SIZE - 2] = gdt.KERNEL_CODE_OFFSET; // cs
     stack[STACK_SIZE - 1] = 0x202; // eflags
 
-    const ret = .{ .stack = stack, .pointer = @ptrToInt(&stack[STACK_SIZE - 18]) };
+    const ret = .{ .stack = stack, .pointer = @ptrToInt(&stack[STACK_SIZE - 19]) };
     return ret;
 }
 

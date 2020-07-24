@@ -32,7 +32,6 @@ export fn commonStub() callconv(.Naked) void {
         \\push  %%es
         \\push  %%fs
         \\push  %%gs
-        \\push  %%ss
         \\mov %%cr3, %%eax
         \\push %%eax
         \\mov   $0x10, %%ax
@@ -55,7 +54,6 @@ export fn commonStub() callconv(.Naked) void {
         \\je same_cr3
         \\mov %%eax, %%cr3
         \\same_cr3:
-        \\pop   %%ss
         \\pop   %%gs
         \\pop   %%fs
         \\pop   %%es

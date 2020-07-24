@@ -49,7 +49,6 @@ pub const CpuState = packed struct {
     // Page directory
     cr3: usize,
     // Extra segments
-    ss: u32,
     gs: u32,
     fs: u32,
     es: u32,
@@ -452,12 +451,13 @@ pub fn initMem(mb_info: BootPayload) Allocator.Error!MemProfile {
 }
 
 ///
-/// Initialise a 32bit kernel stack used for creating a task.
+/// Initialise a stack used for creating a task.
 /// Currently only support fn () noreturn functions for the entry point.
 ///
 /// Arguments:
 ///     IN entry_point: usize    - The pointer to the entry point of the function. Functions only
 ///                                supported is fn () noreturn
+///     IN kernel: bool          - Whether the task is a kernel task or not.
 ///     IN allocator: *Allocator - The allocator use for allocating a stack.
 ///
 /// Return: struct { stack: []u32, pointer: usize }
@@ -466,36 +466,49 @@ pub fn initMem(mb_info: BootPayload) Allocator.Error!MemProfile {
 /// Error: Allocator.Error
 ///     OutOfMemory - Unable to allocate space for the stack.
 ///
-pub fn initTaskStack(entry_point: usize, allocator: *Allocator) Allocator.Error!struct { stack: []u32, pointer: usize } {
+pub fn initTaskStack(entry_point: usize, kernel: bool, allocator: *Allocator) Allocator.Error!struct { kernel_stack: []usize, user_stack: []usize, pointer: usize } {
+    const data_offset = if (kernel) gdt.KERNEL_DATA_OFFSET else gdt.USER_DATA_OFFSET | 0b11;
+    // Setting the bottom two bits of the code offset designates that this is a ring 3 task
+    const code_offset = if (kernel) gdt.KERNEL_CODE_OFFSET else gdt.USER_CODE_OFFSET | 0b11;
+    // Ring switches push and pop two extra values on interrupt: user_esp and user_ss
+    const kernel_stack_bottom = if (kernel) STACK_SIZE - 18 else STACK_SIZE - 20;
+
     // TODO Will need to add the exit point
     // Set up everything as a kernel task
-    var stack = try allocator.alloc(u32, STACK_SIZE);
-    stack[STACK_SIZE - 19] = mem.virtToPhys(@ptrToInt(&paging.kernel_directory));
-    stack[STACK_SIZE - 18] = gdt.KERNEL_DATA_OFFSET; // ss
-    stack[STACK_SIZE - 17] = gdt.KERNEL_DATA_OFFSET; // gs
-    stack[STACK_SIZE - 16] = gdt.KERNEL_DATA_OFFSET; // fs
-    stack[STACK_SIZE - 15] = gdt.KERNEL_DATA_OFFSET; // es
-    stack[STACK_SIZE - 14] = gdt.KERNEL_DATA_OFFSET; // ds
+    var stack = try allocator.alloc(usize, STACK_SIZE);
+    stack[kernel_stack_bottom] = mem.virtToPhys(@ptrToInt(&paging.kernel_directory));
+    stack[kernel_stack_bottom + 1] = data_offset; // gs
+    stack[kernel_stack_bottom + 2] = data_offset; // fs
+    stack[kernel_stack_bottom + 3] = data_offset; // es
+    stack[kernel_stack_bottom + 4] = data_offset; // ds
 
-    stack[STACK_SIZE - 13] = 0; // edi
-    stack[STACK_SIZE - 12] = 0; // esi
+    stack[kernel_stack_bottom + 5] = 0; // edi
+    stack[kernel_stack_bottom + 6] = 0; // esi
     // End of the stack
-    stack[STACK_SIZE - 11] = @ptrToInt(&stack[STACK_SIZE - 1]); // ebp
-    stack[STACK_SIZE - 10] = 0; // esp (temp) this won't be popped by popa bc intel is dump XD
+    stack[kernel_stack_bottom + 7] = @ptrToInt(&stack[STACK_SIZE - 1]); // ebp
+    stack[kernel_stack_bottom + 8] = 0; // esp (temp) this won't be popped by popa bc intel is dump XD
 
-    stack[STACK_SIZE - 9] = 0; // ebx
-    stack[STACK_SIZE - 8] = 0; // edx
-    stack[STACK_SIZE - 7] = 0; // ecx
-    stack[STACK_SIZE - 6] = 0; // eax
+    stack[kernel_stack_bottom + 9] = 0; // ebx
+    stack[kernel_stack_bottom + 10] = 0; // edx
+    stack[kernel_stack_bottom + 11] = 0; // ecx
+    stack[kernel_stack_bottom + 12] = 0; // eax
 
-    stack[STACK_SIZE - 5] = 0; // int_num
-    stack[STACK_SIZE - 4] = 0; // error_code
+    stack[kernel_stack_bottom + 13] = 0; // int_num
+    stack[kernel_stack_bottom + 14] = 0; // error_code
 
-    stack[STACK_SIZE - 3] = entry_point; // eip
-    stack[STACK_SIZE - 2] = gdt.KERNEL_CODE_OFFSET; // cs
-    stack[STACK_SIZE - 1] = 0x202; // eflags
+    stack[kernel_stack_bottom + 15] = entry_point; // eip
+    stack[kernel_stack_bottom + 16] = code_offset; // cs
+    stack[kernel_stack_bottom + 17] = 0x202; // eflags
 
-    const ret = .{ .stack = stack, .pointer = @ptrToInt(&stack[STACK_SIZE - 19]) };
+    var user_stack: []usize = &[_]usize{};
+    if (!kernel) {
+        // Allocate the user stack and put the extra values on the kernel stack needed when chaning privilege levels
+        user_stack = try allocator.alloc(usize, STACK_SIZE);
+        stack[kernel_stack_bottom + 18] = @ptrToInt(user_stack.ptr);
+        stack[kernel_stack_bottom + 19] = data_offset; // eflags
+    }
+
+    const ret = .{ .kernel_stack = stack, .user_stack = user_stack, .pointer = @ptrToInt(&stack[kernel_stack_bottom]) };
     return ret;
 }
 

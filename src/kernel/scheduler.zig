@@ -127,7 +127,9 @@ pub fn init(allocator: *Allocator) Allocator.Error!void {
     errdefer allocator.destroy(current_task);
     // PID 0
     current_task.pid = 0;
-    current_task.stack = @intToPtr([*]u32, @ptrToInt(&KERNEL_STACK_START))[0..4096];
+    current_task.kernel_stack = @intToPtr([*]u32, @ptrToInt(&KERNEL_STACK_START))[0..4096];
+    current_task.user_stack = &[_]usize{};
+    current_task.kernel = true;
     // ESP will be saved on next schedule
 
     // Run the runtime tests here
@@ -137,7 +139,7 @@ pub fn init(allocator: *Allocator) Allocator.Error!void {
     }
 
     // Create the idle task when there are no more tasks left
-    var idle_task = try Task.create(idle, allocator);
+    var idle_task = try Task.create(idle, true, allocator);
     errdefer idle_task.destroy(allocator);
 
     try scheduleTask(idle_task, allocator);

@@ -134,7 +134,7 @@ export fn kmain(boot_payload: arch.BootPayload) void {
     std.log.info(.kmain, "Creating init2\n", .{});
 
     // Create a init2 task
-    var idle_task = task.Task.create(initStage2, &kernel_heap.allocator) catch |e| {
+    var idle_task = task.Task.create(initStage2, true, &kernel_heap.allocator) catch |e| {
         panic_root.panic(@errorReturnTrace(), "Failed to create init stage 2 task: {}\n", .{e});
     };
     scheduler.scheduleTask(idle_task, &kernel_heap.allocator) catch |e| {

@@ -35,11 +35,17 @@ pub const Task = struct {
     /// The unique task identifier
     pid: PidBitmap.IndexType,
 
-    /// Pointer to the stack for the task. This will be allocated on initialisation.
-    stack: []u32,
+    /// Pointer to the kernel stack for the task. This will be allocated on initialisation.
+    kernel_stack: []usize,
+
+    /// Pointer to the user stack for the task. This will be allocated on initialisation and will be empty if it's a kernel task
+    user_stack: []usize,
 
     /// The current stack pointer into the stack.
     stack_pointer: usize,
+
+    /// Whether the process is a kernel process or not
+    kernel: bool,
 
     ///
     /// Create a task. This will allocate a PID and the stack. The stack will be set up as a
@@ -57,16 +63,18 @@ pub const Task = struct {
     ///     OutOfMemory - If there is no more memory to allocate. Any memory or PID allocated will
     ///                   be freed on return.
     ///
-    pub fn create(entry_point: EntryPointFn, allocator: *Allocator) Allocator.Error!*Task {
+    pub fn create(entry_point: EntryPointFn, kernel: bool, allocator: *Allocator) Allocator.Error!*Task {
         var task = try allocator.create(Task);
         errdefer allocator.destroy(task);
 
         task.pid = allocatePid();
         errdefer freePid(task.pid);
 
-        const task_stack = try arch.initTaskStack(@ptrToInt(entry_point), allocator);
-        task.stack = task_stack.stack;
+        const task_stack = try arch.initTaskStack(@ptrToInt(entry_point), kernel, allocator);
+        task.kernel_stack = task_stack.kernel_stack;
+        task.user_stack = task_stack.user_stack;
         task.stack_pointer = task_stack.pointer;
+        task.kernel = kernel;
 
         return task;
     }
@@ -81,8 +89,11 @@ pub const Task = struct {
         freePid(self.pid);
         // We need to check that the the stack has been allocated as task 0 (init) won't have a
         // stack allocated as this in the linker script
-        if (@ptrToInt(self.stack.ptr) != @ptrToInt(&KERNEL_STACK_START)) {
-            allocator.free(self.stack);
+        if (@ptrToInt(self.kernel_stack.ptr) != @ptrToInt(&KERNEL_STACK_START)) {
+            allocator.free(self.kernel_stack);
+        }
+        if (!self.kernel) {
+            allocator.free(self.user_stack);
         }
         allocator.destroy(self);
     }

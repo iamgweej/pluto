@@ -82,8 +82,11 @@ pub fn pickNextTask(ctx: *arch.CpuState) usize {
         current_task = next_task;
     }
 
+    std.log.debug(.scheduler, "Next process ('{}') state: {X}\n", .{ current_task.pid, @intToPtr(*arch.CpuState, current_task.stack_pointer).* });
+
     // Context switch in the interrupt stub handler which will pop the next task state off the
     // stack
+    std.log.debug(.scheduler, "Stack pointer: {X}\n", .{current_task.stack_pointer});
     return current_task.stack_pointer;
 }
 

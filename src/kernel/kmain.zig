@@ -141,6 +141,15 @@ export fn kmain(boot_payload: arch.BootPayload) void {
         panic_root.panic(@errorReturnTrace(), "Failed to schedule init stage 2 task: {}\n", .{e});
     };
 
+    // User mode test
+    // 1. Copy the kernel page directory into a user page directory
+    // 2. Make a new VMM from 0 to some number
+    // 3. Allocate space in the vmm for the user_program
+    // 4. Copy user_program code over from boot module
+    // 5. Create user task
+    // 6. Schedule it
+    // 7. Profit!(?)
+
     // Can't return for now, later this can return maybe
     // TODO: Maybe make this the idle task
     arch.spinWait();

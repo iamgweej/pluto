@@ -62,11 +62,21 @@ pub fn build(b: *Builder) !void {
     exec.setLinkerScriptPath(linker_script_path);
     exec.setTarget(target);
 
+    const user_program = b.addAssemble("user_program", "test/user_program.s");
+    user_program.setOutputDir(b.cache_root);
+    user_program.setTarget(target);
+    user_program.setBuildMode(build_mode);
+    user_program.strip = true;
+
+    const copy_user_program = b.addSystemCommand(&[_][]const u8{ "objcopy", "-O", "binary", "zig-cache/user_program.o", "zig-cache/bin/iso/modules/user_program" });
+    copy_user_program.step.dependOn(&user_program.step);
+
     const make_iso = switch (target.getCpuArch()) {
         .i386 => b.addSystemCommand(&[_][]const u8{ "./makeiso.sh", boot_path, modules_path, iso_dir_path, exec.getOutputPath(), ramdisk_path, output_iso }),
         else => unreachable,
     };
     make_iso.step.dependOn(&exec.step);
+    make_iso.step.dependOn(&copy_user_program.step);
 
     var ramdisk_files_al = ArrayList([]const u8).init(b.allocator);
     defer ramdisk_files_al.deinit();

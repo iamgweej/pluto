@@ -112,6 +112,9 @@ pub const VmmError = error{
 /// This is the start of the memory owned by the kernel and so is where the kernel VMM starts
 extern var KERNEL_ADDR_OFFSET: *u32;
 
+/// The virtual memory manager associated with the kernel address space
+pub var kernel_vmm: VirtualMemoryManager(arch.VmmPayload) = undefined;
+
 ///
 /// Construct a virtual memory manager to keep track of allocated and free virtual memory regions within a certain space
 ///
@@ -441,6 +444,7 @@ pub fn init(mem_profile: *const mem.MemProfile, allocator: *Allocator) Allocator
             else => panic(@errorReturnTrace(), "Failed mapping region in VMM {X}: {}\n", .{ entry, e }),
         };
     }
+    kernel_vmm = vmm;
 
     switch (build_options.test_mode) {
         .Initialisation => runtimeTests(arch.VmmPayload, vmm, mem_profile),

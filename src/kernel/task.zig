@@ -77,13 +77,15 @@ pub const Task = struct {
         const pid = allocatePid();
         errdefer freePid(task.pid);
 
+        var task_vmm = if (kernel) vmm.kernel_vmm else try vmm.VirtualMemoryManager(arch.VmmPayload).init(0, std.math.maxInt(usize) - arch.MEMORY_BLOCK_SIZE, allocator, arch.VMM_MAPPER, undefined);
+
         task.* = .{
             .pid = pid,
             .kernel_stack = try allocator.alloc(usize, STACK_SIZE),
             .user_stack = if (kernel) &[_]usize{} else try allocator.alloc(usize, STACK_SIZE),
             .stack_pointer = @ptrToInt(&task.kernel_stack[STACK_SIZE - 1]),
             .kernel = kernel,
-            .vmm = try vmm.VirtualMemoryManager(arch.VmmPayload).init(0, std.math.maxInt(usize) - arch.MEMORY_BLOCK_SIZE, allocator, arch.VMM_MAPPER, undefined),
+            .vmm = task_vmm,
         };
 
         try arch.initTask(task, @ptrToInt(entry_point), allocator);

@@ -8,6 +8,7 @@ const mock_path = build_options.mock_path;
 const arch = @import("arch.zig").internals;
 const panic = if (is_test) @import(mock_path ++ "panic_mock.zig").panic else @import("panic.zig").panic;
 const ComptimeBitmap = @import("bitmap.zig").ComptimeBitmap;
+const vmm = @import("vmm.zig");
 const Allocator = std.mem.Allocator;
 
 /// The kernels main stack start as this is used to check for if the task being destroyed is this stack
@@ -50,6 +51,9 @@ pub const Task = struct {
     /// Whether the process is a kernel process or not
     kernel: bool,
 
+    /// The virtual memory manager belonging to the task
+    vmm: vmm.VirtualMemoryManager(arch.VmmPayload),
+
     ///
     /// Create a task. This will allocate a PID and the stack. The stack will be set up as a
     /// kernel task. As this is a new task, the stack will need to be initialised with the CPU
@@ -70,13 +74,17 @@ pub const Task = struct {
         var task = try allocator.create(Task);
         errdefer allocator.destroy(task);
 
-        task.pid = allocatePid();
+        const pid = allocatePid();
         errdefer freePid(task.pid);
 
-        task.kernel_stack = try allocator.alloc(usize, STACK_SIZE);
-        task.user_stack = if (kernel) &[_]usize{} else try allocator.alloc(usize, STACK_SIZE);
-        task.stack_pointer = @ptrToInt(&task.kernel_stack[STACK_SIZE - 1]);
-        task.kernel = kernel;
+        task.* = .{
+            .pid = pid,
+            .kernel_stack = try allocator.alloc(usize, STACK_SIZE),
+            .user_stack = if (kernel) &[_]usize{} else try allocator.alloc(usize, STACK_SIZE),
+            .stack_pointer = @ptrToInt(&task.kernel_stack[STACK_SIZE - 1]),
+            .kernel = kernel,
+            .vmm = try vmm.VirtualMemoryManager(arch.VmmPayload).init(0, std.math.maxInt(usize) - arch.MEMORY_BLOCK_SIZE, allocator, arch.VMM_MAPPER, undefined),
+        };
 
         try arch.initTask(task, @ptrToInt(entry_point), allocator);
 

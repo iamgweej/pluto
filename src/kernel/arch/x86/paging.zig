@@ -376,6 +376,11 @@ pub fn unmap(virtual_start: usize, virtual_end: usize, dir: *Directory) (Allocat
     }
 }
 
+pub fn copyDir(src: *Directory) *Directory {
+    // TODO
+    return undefined;
+}
+
 ///
 /// Called when a page fault occurs. This will log the CPU state and control registers.
 ///

@@ -502,6 +502,9 @@ pub fn initTask(task: *Task, entry_point: usize, allocator: *Allocator) Allocato
         // Put the extra values on the kernel stack needed when chaning privilege levels
         stack.*[kernel_stack_bottom + 18] = @ptrToInt(task.user_stack.ptr);
         stack.*[kernel_stack_bottom + 19] = data_offset; // eflags
+
+        // Create a new page directory for the user task by copying the kernel directory
+        task.vmm.payload = paging.copyDir(&paging.kernel_directory);
     }
     task.stack_pointer = @ptrToInt(&stack.*[kernel_stack_bottom]);
 }

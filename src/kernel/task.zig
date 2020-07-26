@@ -28,6 +28,9 @@ var all_pids: PidBitmap = brk: {
     break :brk pids;
 };
 
+/// The default stack size of a task. Currently this is set to a page size.
+pub const STACK_SIZE: u32 = arch.MEMORY_BLOCK_SIZE / @sizeOf(u32);
+
 /// The task control block for storing all the information needed to save and restore a task.
 pub const Task = struct {
     const Self = @This();
@@ -70,11 +73,12 @@ pub const Task = struct {
         task.pid = allocatePid();
         errdefer freePid(task.pid);
 
-        const task_stack = try arch.initTaskStack(@ptrToInt(entry_point), kernel, allocator);
-        task.kernel_stack = task_stack.kernel_stack;
-        task.user_stack = task_stack.user_stack;
-        task.stack_pointer = task_stack.pointer;
+        task.kernel_stack = try allocator.alloc(usize, STACK_SIZE);
+        task.user_stack = if (kernel) &[_]usize{} else try allocator.alloc(usize, STACK_SIZE);
+        task.stack_pointer = @ptrToInt(&task.kernel_stack[STACK_SIZE - 1]);
         task.kernel = kernel;
+
+        try arch.initTask(task, @ptrToInt(entry_point), allocator);
 
         return task;
     }

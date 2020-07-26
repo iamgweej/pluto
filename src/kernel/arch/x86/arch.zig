@@ -20,6 +20,7 @@ const vmm = @import("../../vmm.zig");
 const Serial = @import("../../serial.zig").Serial;
 const panic = @import("../../panic.zig").panic;
 const TTY = @import("../../tty.zig").TTY;
+const Task = @import("../../task.zig").Task;
 const MemProfile = mem.MemProfile;
 
 /// The virtual end of the kernel code.
@@ -95,9 +96,6 @@ pub const VMM_MAPPER: vmm.Mapper(VmmPayload) = vmm.Mapper(VmmPayload){ .mapFn = 
 
 /// The size of each allocatable block of memory, normally set to the page size.
 pub const MEMORY_BLOCK_SIZE: usize = paging.PAGE_SIZE_4KB;
-
-/// The default stack size of a task. Currently this is set to a page size.
-pub const STACK_SIZE: u32 = MEMORY_BLOCK_SIZE / @sizeOf(u32);
 
 ///
 /// Assembly to write to a given port with a byte of data.
@@ -455,61 +453,57 @@ pub fn initMem(mb_info: BootPayload) Allocator.Error!MemProfile {
 /// Currently only support fn () noreturn functions for the entry point.
 ///
 /// Arguments:
+///     IN task: *Task           - The task to be initialised. The function will only modify whatever
+///                                is required by the architecture. In the case of x86, it will put
+///                                the initial CpuState on the kernel stack.
 ///     IN entry_point: usize    - The pointer to the entry point of the function. Functions only
 ///                                supported is fn () noreturn
-///     IN kernel: bool          - Whether the task is a kernel task or not.
 ///     IN allocator: *Allocator - The allocator use for allocating a stack.
-///
-/// Return: struct { stack: []u32, pointer: usize }
-///     The stack and stack pointer with the stack initialised as a 32bit kernel stack.
 ///
 /// Error: Allocator.Error
 ///     OutOfMemory - Unable to allocate space for the stack.
 ///
-pub fn initTaskStack(entry_point: usize, kernel: bool, allocator: *Allocator) Allocator.Error!struct { kernel_stack: []usize, user_stack: []usize, pointer: usize } {
-    const data_offset = if (kernel) gdt.KERNEL_DATA_OFFSET else gdt.USER_DATA_OFFSET | 0b11;
+pub fn initTask(task: *Task, entry_point: usize, allocator: *Allocator) Allocator.Error!void {
+    const data_offset = if (task.kernel) gdt.KERNEL_DATA_OFFSET else gdt.USER_DATA_OFFSET | 0b11;
     // Setting the bottom two bits of the code offset designates that this is a ring 3 task
-    const code_offset = if (kernel) gdt.KERNEL_CODE_OFFSET else gdt.USER_CODE_OFFSET | 0b11;
+    const code_offset = if (task.kernel) gdt.KERNEL_CODE_OFFSET else gdt.USER_CODE_OFFSET | 0b11;
     // Ring switches push and pop two extra values on interrupt: user_esp and user_ss
-    const kernel_stack_bottom = if (kernel) STACK_SIZE - 18 else STACK_SIZE - 20;
+    const kernel_stack_bottom = if (task.kernel) task.kernel_stack.len - 18 else task.kernel_stack.len - 20;
+
+    var stack = &task.kernel_stack;
 
     // TODO Will need to add the exit point
     // Set up everything as a kernel task
-    var stack = try allocator.alloc(usize, STACK_SIZE);
-    stack[kernel_stack_bottom] = mem.virtToPhys(@ptrToInt(&paging.kernel_directory));
-    stack[kernel_stack_bottom + 1] = data_offset; // gs
-    stack[kernel_stack_bottom + 2] = data_offset; // fs
-    stack[kernel_stack_bottom + 3] = data_offset; // es
-    stack[kernel_stack_bottom + 4] = data_offset; // ds
+    stack.*[kernel_stack_bottom] = mem.virtToPhys(@ptrToInt(&paging.kernel_directory));
+    stack.*[kernel_stack_bottom + 1] = data_offset; // gs
+    stack.*[kernel_stack_bottom + 2] = data_offset; // fs
+    stack.*[kernel_stack_bottom + 3] = data_offset; // es
+    stack.*[kernel_stack_bottom + 4] = data_offset; // ds
 
-    stack[kernel_stack_bottom + 5] = 0; // edi
-    stack[kernel_stack_bottom + 6] = 0; // esi
+    stack.*[kernel_stack_bottom + 5] = 0; // edi
+    stack.*[kernel_stack_bottom + 6] = 0; // esi
     // End of the stack
-    stack[kernel_stack_bottom + 7] = @ptrToInt(&stack[STACK_SIZE - 1]); // ebp
-    stack[kernel_stack_bottom + 8] = 0; // esp (temp) this won't be popped by popa bc intel is dump XD
+    stack.*[kernel_stack_bottom + 7] = @ptrToInt(&stack.*[stack.len - 1]); // ebp
+    stack.*[kernel_stack_bottom + 8] = 0; // esp (temp) this won't be popped by popa bc intel is dump XD
 
-    stack[kernel_stack_bottom + 9] = 0; // ebx
-    stack[kernel_stack_bottom + 10] = 0; // edx
-    stack[kernel_stack_bottom + 11] = 0; // ecx
-    stack[kernel_stack_bottom + 12] = 0; // eax
+    stack.*[kernel_stack_bottom + 9] = 0; // ebx
+    stack.*[kernel_stack_bottom + 10] = 0; // edx
+    stack.*[kernel_stack_bottom + 11] = 0; // ecx
+    stack.*[kernel_stack_bottom + 12] = 0; // eax
 
-    stack[kernel_stack_bottom + 13] = 0; // int_num
-    stack[kernel_stack_bottom + 14] = 0; // error_code
+    stack.*[kernel_stack_bottom + 13] = 0; // int_num
+    stack.*[kernel_stack_bottom + 14] = 0; // error_code
 
-    stack[kernel_stack_bottom + 15] = entry_point; // eip
-    stack[kernel_stack_bottom + 16] = code_offset; // cs
-    stack[kernel_stack_bottom + 17] = 0x202; // eflags
+    stack.*[kernel_stack_bottom + 15] = entry_point; // eip
+    stack.*[kernel_stack_bottom + 16] = code_offset; // cs
+    stack.*[kernel_stack_bottom + 17] = 0x202; // eflags
 
-    var user_stack: []usize = &[_]usize{};
-    if (!kernel) {
-        // Allocate the user stack and put the extra values on the kernel stack needed when chaning privilege levels
-        user_stack = try allocator.alloc(usize, STACK_SIZE);
-        stack[kernel_stack_bottom + 18] = @ptrToInt(user_stack.ptr);
-        stack[kernel_stack_bottom + 19] = data_offset; // eflags
+    if (!task.kernel) {
+        // Put the extra values on the kernel stack needed when chaning privilege levels
+        stack.*[kernel_stack_bottom + 18] = @ptrToInt(task.user_stack.ptr);
+        stack.*[kernel_stack_bottom + 19] = data_offset; // eflags
     }
-
-    const ret = .{ .kernel_stack = stack, .user_stack = user_stack, .pointer = @ptrToInt(&stack[kernel_stack_bottom]) };
-    return ret;
+    task.stack_pointer = @ptrToInt(&stack.*[kernel_stack_bottom]);
 }
 
 ///

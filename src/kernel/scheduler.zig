@@ -159,14 +159,14 @@ fn task_create(entry_point: EntryPointFn, allocator: *Allocator) Allocator.Error
     errdefer allocator.destroy(t);
     t.pid = test_pid_counter;
     // Just alloc something
-    t.stack = try allocator.alloc(u32, 1);
+    t.kernel_stack = try allocator.alloc(u32, 1);
     t.stack_pointer = 0;
     test_pid_counter += 1;
     return t;
 }
 
 fn task_destroy(self: *Task, allocator: *Allocator) void {
-    if (@ptrToInt(self.stack.ptr) != @ptrToInt(&KERNEL_STACK_START)) {
+    if (@ptrToInt(self.kernel_stack.ptr) != @ptrToInt(&KERNEL_STACK_START)) {
         allocator.free(self.stack);
     }
     allocator.destroy(self);
@@ -189,11 +189,11 @@ test "pickNextTask" {
     current_task = try allocator.create(Task);
     defer allocator.destroy(current_task);
     current_task.pid = 0;
-    current_task.stack = @intToPtr([*]u32, @ptrToInt(&KERNEL_STACK_START))[0..4096];
+    current_task.kernel_stack = @intToPtr([*]u32, @ptrToInt(&KERNEL_STACK_START))[0..4096];
     current_task.stack_pointer = @ptrToInt(&KERNEL_STACK_START);
 
     // Create two tasks and schedule them
-    var test_fn1_task = try Task.create(test_fn1, allocator);
+    var test_fn1_task = try Task.create(test_fn1, true, allocator);
     defer test_fn1_task.destroy(allocator);
     try scheduleTask(test_fn1_task, allocator);
 
@@ -248,7 +248,7 @@ test "createNewTask add new task" {
     // Init the task list
     tasks = TailQueue(*Task).init();
 
-    var test_fn1_task = try Task.create(test_fn1, allocator);
+    var test_fn1_task = try Task.create(test_fn1, true, allocator);
     defer test_fn1_task.destroy(allocator);
     try scheduleTask(test_fn1_task, allocator);
 
@@ -270,7 +270,7 @@ test "init" {
     try init(allocator);
 
     expectEqual(current_task.pid, 0);
-    expectEqual(current_task.stack, @intToPtr([*]u32, @ptrToInt(&KERNEL_STACK_START))[0..4096]);
+    expectEqual(current_task.kernel_stack, @intToPtr([*]u32, @ptrToInt(&KERNEL_STACK_START))[0..4096]);
 
     expectEqual(tasks.len, 1);
 

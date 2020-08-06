@@ -503,8 +503,10 @@ pub fn initTask(task: *Task, entry_point: usize, allocator: *Allocator) Allocato
         stack.*[kernel_stack_bottom + 18] = @ptrToInt(task.user_stack.ptr);
         stack.*[kernel_stack_bottom + 19] = data_offset; // eflags
 
-        // Create a new page directory for the user task by copying the kernel directory
-        task.vmm.payload = paging.copyDir(&paging.kernel_directory);
+        // Create a new page directory for the user task by mirroring the kernel directory
+        // We need kernel mem mapped so we don't get a page fault when entering kernel code from an interrupt
+        task.vmm.payload = try paging.mirrorDir(&paging.kernel_directory, allocator);
+        stack.*[kernel_stack_bottom] = task.vmm.virtToPhys(@ptrToInt(&task.vmm.payload));
     }
     task.stack_pointer = @ptrToInt(&stack.*[kernel_stack_bottom]);
 }

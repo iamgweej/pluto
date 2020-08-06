@@ -376,9 +376,10 @@ pub fn unmap(virtual_start: usize, virtual_end: usize, dir: *Directory) (Allocat
     }
 }
 
-pub fn copyDir(src: *Directory) *Directory {
-    // TODO
-    return undefined;
+pub fn mirrorDir(src: *Directory, allocator: *Allocator) Allocator.Error!*Directory {
+    var dir = try allocator.create(Directory);
+    @memcpy(@ptrCast([*]u8, dir), @ptrCast([*]u8, src), @sizeOf(Directory));
+    return dir;
 }
 
 ///

@@ -167,7 +167,7 @@ fn task_create(entry_point: EntryPointFn, allocator: *Allocator) Allocator.Error
 
 fn task_destroy(self: *Task, allocator: *Allocator) void {
     if (@ptrToInt(self.kernel_stack.ptr) != @ptrToInt(&KERNEL_STACK_START)) {
-        allocator.free(self.stack);
+        allocator.free(self.kernel_stack);
     }
     allocator.destroy(self);
 }
@@ -197,7 +197,7 @@ test "pickNextTask" {
     defer test_fn1_task.destroy(allocator);
     try scheduleTask(test_fn1_task, allocator);
 
-    var test_fn2_task = try Task.create(test_fn2, allocator);
+    var test_fn2_task = try Task.create(test_fn2, true, allocator);
     defer test_fn2_task.destroy(allocator);
     try scheduleTask(test_fn2_task, allocator);
 
@@ -308,7 +308,7 @@ fn rt_variable_preserved(allocator: *Allocator) void {
     defer allocator.destroy(is_set);
     is_set.* = true;
 
-    var test_task = Task.create(task_function, allocator) catch unreachable;
+    var test_task = Task.create(task_function, true, allocator) catch unreachable;
     scheduleTask(test_task, allocator) catch unreachable;
     // TODO: Need to add the ability to remove tasks
 

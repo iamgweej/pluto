@@ -77,7 +77,7 @@ pub const Task = struct {
         const pid = allocatePid();
         errdefer freePid(task.pid);
 
-        var task_vmm = if (kernel) vmm.kernel_vmm else try vmm.VirtualMemoryManager(arch.VmmPayload).init(0, std.math.maxInt(usize) - arch.MEMORY_BLOCK_SIZE, allocator, arch.VMM_MAPPER, undefined);
+        var task_vmm = if (kernel) vmm.kernel_vmm else vmm.kernel_vmm.mirror();
 
         task.* = .{
             .pid = pid,

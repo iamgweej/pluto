@@ -179,6 +179,18 @@ pub fn VirtualMemoryManager(comptime Payload: type) type {
             };
         }
 
+        pub fn mirror(self: *const Self) Self {
+            return .{
+                .bmp = self.bmp,
+                .start = self.start,
+                .end = self.end,
+                .allocator = self.allocator,
+                .allocations = self.allocations,
+                .mapper = self.mapper,
+                .payload = self.payload,
+            };
+        }
+
         ///
         /// Find the physical address that a given virtual address is mapped to.
         ///
@@ -605,6 +617,18 @@ test "set" {
     while (vaddr < vmm.end) : (vaddr += BLOCK_SIZE) {
         std.testing.expect(!(try allocations.isSet((vaddr - vmm.start) / BLOCK_SIZE)));
     }
+}
+
+test "mirror" {
+    const num_entries = 512;
+    var vmm = try testInit(num_entries);
+
+    var mirrored = vmm.mirror();
+    std.testing.expectEqual(vmm.start, mirrored.start);
+    std.testing.expectEqual(vmm.end, mirrored.end);
+    std.testing.expectEqual(vmm.allocations.unmanaged.entries.items, mirrored.allocations.unmanaged.entries.items);
+    std.testing.expectEqual(vmm.mapper, mirrored.mapper);
+    std.testing.expectEqual(vmm.payload, mirrored.payload);
 }
 
 var test_allocations: ?bitmap.Bitmap(u64) = null;

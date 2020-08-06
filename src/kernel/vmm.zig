@@ -623,12 +623,31 @@ test "mirror" {
     const num_entries = 512;
     var vmm = try testInit(num_entries);
 
+    const attrs = .{ .kernel = true, .cachable = true, .writable = true };
+    const alloc0 = (try vmm.alloc(24, attrs)).?;
+
     var mirrored = vmm.mirror();
+    std.testing.expectEqual(vmm.bmp.num_free_entries, mirrored.bmp.num_free_entries);
     std.testing.expectEqual(vmm.start, mirrored.start);
     std.testing.expectEqual(vmm.end, mirrored.end);
     std.testing.expectEqual(vmm.allocations.unmanaged.entries.items, mirrored.allocations.unmanaged.entries.items);
     std.testing.expectEqual(vmm.mapper, mirrored.mapper);
     std.testing.expectEqual(vmm.payload, mirrored.payload);
+
+    // Allocating in the new VMM shouldn't allocate in the mirrored one
+    const alloc1 = (try mirrored.alloc(3, attrs)).?;
+    std.testing.expectEqual(vmm.allocations.unmanaged.entries.items.len + 1, mirrored.allocations.unmanaged.entries.items.len);
+    std.testing.expectEqual(vmm.bmp.num_free_entries - 3, mirrored.bmp.num_free_entries);
+    std.testing.expectError(VmmError.NotAllocated, vmm.virtToPhys(alloc1));
+
+    // And vice-versa
+    const alloc2 = (try vmm.alloc(3, attrs)).?;
+    const alloc3 = (try vmm.alloc(1, attrs)).?;
+    const alloc4 = (try vmm.alloc(1, attrs)).?;
+    std.testing.expectEqual(vmm.allocations.unmanaged.entries.items.len - 2, mirrored.allocations.unmanaged.entries.items.len);
+    std.testing.expectEqual(vmm.bmp.num_free_entries + 2, mirrored.bmp.num_free_entries);
+    std.testing.expectError(VmmError.NotAllocated, mirrored.virtToPhys(alloc3));
+    std.testing.expectError(VmmError.NotAllocated, mirrored.virtToPhys(alloc4));
 }
 
 var test_allocations: ?bitmap.Bitmap(u64) = null;

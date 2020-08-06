@@ -503,9 +503,11 @@ pub fn initTask(task: *Task, entry_point: usize, allocator: *Allocator) Allocato
         stack.*[kernel_stack_bottom + 18] = @ptrToInt(task.user_stack.ptr);
         stack.*[kernel_stack_bottom + 19] = data_offset; // eflags
 
-        // Create a new page directory for the user task by mirroring the kernel directory
-        // We need kernel mem mapped so we don't get a page fault when entering kernel code from an interrupt
-        task.vmm.payload = try paging.mirrorDir(&paging.kernel_directory, allocator);
+        if (!builtin.is_test) {
+            // Create a new page directory for the user task by mirroring the kernel directory
+            // We need kernel mem mapped so we don't get a page fault when entering kernel code from an interrupt
+            task.vmm.payload = try paging.mirrorDir(&paging.kernel_directory, allocator);
+        }
         stack.*[kernel_stack_bottom] = task.vmm.virtToPhys(@ptrToInt(&task.vmm.payload)) catch |e| {
             panic(@errorReturnTrace(), "Failed to get the physical address of the user task's pafe directory: {}\n", .{e});
         };

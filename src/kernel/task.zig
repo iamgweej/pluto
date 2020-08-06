@@ -147,7 +147,7 @@ test "create out of memory for task" {
     // Set the global allocator
     var fa = FailingAllocator.init(testing_allocator, 0);
 
-    expectError(error.OutOfMemory, Task.create(test_fn1, &fa.allocator));
+    expectError(error.OutOfMemory, Task.create(test_fn1, true, &fa.allocator));
 
     // Make sure any memory allocated is freed
     expectEqual(fa.allocated_bytes, fa.freed_bytes);
@@ -160,7 +160,7 @@ test "create out of memory for stack" {
     // Set the global allocator
     var fa = FailingAllocator.init(testing_allocator, 1);
 
-    expectError(error.OutOfMemory, Task.create(test_fn1, &fa.allocator));
+    expectError(error.OutOfMemory, Task.create(test_fn1, true, &fa.allocator));
 
     // Make sure any memory allocated is freed
     expectEqual(fa.allocated_bytes, fa.freed_bytes);
@@ -170,7 +170,7 @@ test "create out of memory for stack" {
 }
 
 test "create expected setup" {
-    var task = try Task.create(test_fn1, std.testing.allocator);
+    var task = try Task.create(test_fn1, true, std.testing.allocator);
     defer task.destroy(std.testing.allocator);
 
     // Will allocate the first PID 1, 0 will always be allocated
@@ -182,7 +182,7 @@ test "destroy cleans up" {
     // So if any alloc were not freed, this will fail the test
     var fa = FailingAllocator.init(testing_allocator, 2);
 
-    var task = try Task.create(test_fn1, &fa.allocator);
+    var task = try Task.create(test_fn1, true, &fa.allocator);
 
     task.destroy(&fa.allocator);
 
@@ -194,8 +194,8 @@ test "destroy cleans up" {
 }
 
 test "Multiple create" {
-    var task1 = try Task.create(test_fn1, std.testing.allocator);
-    var task2 = try Task.create(test_fn1, std.testing.allocator);
+    var task1 = try Task.create(test_fn1, true, std.testing.allocator);
+    var task2 = try Task.create(test_fn1, true, std.testing.allocator);
 
     expectEqual(task1.pid, 1);
     expectEqual(task2.pid, 2);
@@ -205,7 +205,7 @@ test "Multiple create" {
 
     expectEqual(all_pids.bitmap, 5);
 
-    var task3 = try Task.create(test_fn1, std.testing.allocator);
+    var task3 = try Task.create(test_fn1, true, std.testing.allocator);
 
     expectEqual(task3.pid, 1);
     expectEqual(all_pids.bitmap, 7);

@@ -9,7 +9,7 @@ const paging = @import("paging_mock.zig");
 const Serial = @import("../../../src/kernel/serial.zig").Serial;
 const TTY = @import("../../../src/kernel/tty.zig").TTY;
 
-pub const task = @import("task_mock.zig");
+pub const task = @import("../../../src/kernel/task.zig");
 
 const mock_framework = @import("mock_framework.zig");
 pub const initTest = mock_framework.initTest;
@@ -137,10 +137,7 @@ pub fn initMem(payload: BootPayload) Allocator.Error!mem.MemProfile {
     };
 }
 
-pub fn initTaskStack(entry_point: usize, allocator: *Allocator) Allocator.Error!struct { stack: []u32, pointer: usize } {
-    const ret = .{ .stack = &([_]u32{}), .pointer = 0 };
-    return ret;
-}
+pub fn initTask(t: *Task, entry_point: usize, allocator: *Allocator) Allocator.Error!void {}
 
 pub fn init(mem_profile: *const MemProfile) void {
     // I'll get back to this as this doesn't effect the current testing.

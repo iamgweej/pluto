@@ -71,6 +71,8 @@ pub fn build(b: *Builder) !void {
     var ramdisk_files_al = ArrayList([]const u8).init(b.allocator);
     defer ramdisk_files_al.deinit();
 
+    try ramdisk_files_al.append("fat32.IMA");
+
     // Add some test files for the ramdisk runtime tests
     if (test_mode == .Initialisation) {
         try ramdisk_files_al.append("test/ramdisk_test1.txt");
@@ -117,6 +119,8 @@ pub fn build(b: *Builder) !void {
     }
     try qemu_args_al.append("-serial");
     try qemu_args_al.append("stdio");
+    try qemu_args_al.append("-m");
+    try qemu_args_al.append("2G");
     switch (target.getCpuArch()) {
         .i386 => {
             try qemu_args_al.append("-boot");

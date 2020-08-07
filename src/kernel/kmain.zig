@@ -17,6 +17,7 @@ const heap = @import("heap.zig");
 const scheduler = @import("scheduler.zig");
 const vfs = @import("filesystem/vfs.zig");
 const initrd = @import("filesystem/initrd.zig");
+const fat32 = @import("filesystem/fat32.zig");
 
 comptime {
     if (!is_test) {
@@ -87,6 +88,8 @@ export fn kmain(boot_payload: arch.BootPayload) void {
     if (!std.math.isPowerOfTwo(heap_size)) {
         heap_size = std.math.floorPowerOfTwo(usize, heap_size);
     }
+    std.log.info(.NONE, "Total memory: 0x{X}\n", .{mem_profile.mem_kb * 1024});
+    std.log.info(.kmain, "Heap size: 0x{X}\n", .{heap_size});
     var kernel_heap = heap.init(arch.VmmPayload, &kernel_vmm, vmm.Attributes{ .kernel = true, .writable = true, .cachable = true }, heap_size) catch |e| {
         panic_root.panic(@errorReturnTrace(), "Failed to initialise kernel heap: {}\n", .{e});
     };
@@ -123,10 +126,33 @@ export fn kmain(boot_payload: arch.BootPayload) void {
         vfs.setRoot(ramdisk_filesystem.root_node);
 
         // Load all files here
+        var file = vfs.openFile("/fat32.IMA", .NO_CREATION) catch unreachable;
+        defer file.close();
+
+        // 50MB
+        var image = file.read(0x3200000) catch unreachable;
+        defer (&kernel_heap.allocator).free(image);
+        // Faf a ram device so not to dupe the memory
+        var stream = std.io.fixedBufferStream(image);
+        var fat32_fs = fat32.Fat32.init(&stream, &kernel_heap.allocator) catch unreachable;
+        defer fat32_fs.deinit();
+
+        vfs.setRoot(fat32_fs.root_node.node);
+        // var f1 = vfs.openFile("/folder/file.txt", .NO_CREATION) catch unreachable;
+        // defer f1.close();
+        // var r1 = f1.read(1024) catch unreachable;
+        // defer (&kernel_heap.allocator).free(r1); 
+        // std.log.info(.NONE, "File: {}\n", .{r1});
+
+        var f2 = vfs.openFile("/folder/../sp  .txt", .NO_CREATION) catch unreachable;
+        defer f2.close();
+        var r2 = f2.read(1024) catch unreachable;
+        defer (&kernel_heap.allocator).free(r2); 
+        std.log.info(.NONE, "File: {}\n", .{r2});
     }
 
     // Initialisation is finished, now does other stuff
-    std.log.info(.kmain, "Init\n", .{});
+    std.log.info(.kmain, "Done\n", .{});
 
     // Main initialisation finished so can enable interrupts
     arch.enableInterrupts();

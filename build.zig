@@ -1,5 +1,5 @@
 const std = @import("std");
-const logger = std.log.scoped(.builder);
+const log = std.log.scoped(.builder);
 const builtin = @import("builtin");
 const rt = @import("test/runtime_test.zig");
 const RuntimeStep = rt.RuntimeStep;
@@ -78,10 +78,22 @@ pub fn build(b: *Builder) !void {
     var ramdisk_files_al = ArrayList([]const u8).init(b.allocator);
     defer ramdisk_files_al.deinit();
 
-    // Add some test files for the ramdisk runtime tests
     if (test_mode == .Initialisation) {
+        // Add some test files for the ramdisk runtime tests
         try ramdisk_files_al.append("test/ramdisk_test1.txt");
         try ramdisk_files_al.append("test/ramdisk_test2.txt");
+    } else if (test_mode == .Scheduler) {
+        // Add some test files for the user mode runtime tests
+        const user_program = b.addAssemble("user_program", "test/user_program.s");
+        user_program.setOutputDir(b.cache_root);
+        user_program.setTarget(target);
+        user_program.setBuildMode(build_mode);
+        user_program.strip = true;
+
+        const copy_user_program = b.addSystemCommand(&[_][]const u8{ "objcopy", "-O", "binary", "zig-cache/user_program.o", "zig-cache/user_program" });
+        copy_user_program.step.dependOn(&user_program.step);
+        try ramdisk_files_al.append("zig-cache/user_program");
+        exec.step.dependOn(&copy_user_program.step);
     }
 
     const ramdisk_step = RamdiskStep.create(b, target, ramdisk_files_al.toOwnedSlice(), ramdisk_path);
@@ -99,22 +111,21 @@ pub fn build(b: *Builder) !void {
     unit_tests.addBuildOption(TestMode, "test_mode", test_mode);
     unit_tests.addBuildOption([]const u8, "mock_path", mock_path);
     unit_tests.addBuildOption([]const u8, "arch_mock_path", arch_mock_path);
+    unit_tests.setTarget(.{ .cpu_arch = target.cpu_arch });
 
     if (builtin.os.tag != .windows) {
         unit_tests.enable_qemu = true;
     }
 
-    unit_tests.setTarget(.{ .cpu_arch = target.cpu_arch });
+    // Run the mock gen
+    const mock_gen = b.addExecutable("mock_gen", "test/gen_types.zig");
+    mock_gen.setMainPkgPath(".");
+    const mock_gen_run = mock_gen.run();
+    unit_tests.step.dependOn(&mock_gen_run.step);
+
     test_step.dependOn(&unit_tests.step);
 
     const rt_test_step = b.step("rt-test", "Run runtime tests");
-    const build_mode_str = switch (build_mode) {
-        .Debug => "",
-        .ReleaseSafe => "-Drelease-safe",
-        .ReleaseFast => "-Drelease-fast",
-        .ReleaseSmall => "-Drelease-small",
-    };
-
     var qemu_args_al = ArrayList([]const u8).init(b.allocator);
     defer qemu_args_al.deinit();
 
@@ -200,7 +211,13 @@ const Fat32BuilderStep = struct {
     ///
     fn make(step: *Step) (error{EndOfStream} || File.OpenError || File.ReadError || File.WriteError || File.SeekError || Fat32.Error)!void {
         const self = @fieldParentPtr(Fat32BuilderStep, "step", step);
-        try Fat32.make(self.options, self.out_file_path);
+        // Open the out file
+        const image = try std.fs.cwd().createFile(self.out_file_path, .{ .read = true });
+
+        // If there was an error, delete the image as this will be invalid
+        errdefer (std.fs.cwd().deleteFile(self.out_file_path) catch unreachable);
+        defer image.close();
+        try Fat32.make(self.options, image);
     }
 
     ///

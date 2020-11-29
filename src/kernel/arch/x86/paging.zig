@@ -25,6 +25,36 @@ pub const Directory = packed struct {
 
     /// The tables allocated for the directory. This is ignored by the CPU.
     tables: [ENTRIES_PER_DIRECTORY]?*Table,
+
+    /// The allocator used to allocate and free tables
+    allocator: *std.mem.Allocator,
+
+    ///
+    /// Free the state occupied by the directory. It will be unusable afterwards.
+    ///
+    /// Arguments:
+    ///     IN self: *Self - The directory to deinitialise.
+    ///
+    pub fn deinit(self: *@This()) void {
+        for (self.tables) |table| {
+            if (table) |t| {
+                self.allocator.destroy(t);
+            }
+        }
+    }
+
+    ///
+    /// Copy the page directory. Changes to one copy will not affect the other
+    ///
+    /// Arguments:
+    ///     IN self: *const Directory - The directory to copy
+    ///
+    /// Return: Directory
+    ///     The copy
+    ///
+    pub fn copy(self: *const Directory) Directory {
+        return self.*;
+    }
 };
 
 /// An array of table entries. Forms the second level of paging and covers a 4MB memory space.
@@ -109,7 +139,7 @@ pub const PAGE_SIZE_4MB: usize = 0x400000;
 pub const PAGE_SIZE_4KB: usize = PAGE_SIZE_4MB / 1024;
 
 /// The kernel's page directory. Should only be used to map kernel-owned code and data
-pub var kernel_directory: Directory align(@truncate(u29, PAGE_SIZE_4KB)) = Directory{ .entries = [_]DirectoryEntry{0} ** ENTRIES_PER_DIRECTORY, .tables = [_]?*Table{null} ** ENTRIES_PER_DIRECTORY };
+pub var kernel_directory: Directory align(@truncate(u29, PAGE_SIZE_4KB)) = Directory{ .entries = [_]DirectoryEntry{0} ** ENTRIES_PER_DIRECTORY, .tables = [_]?*Table{null} ** ENTRIES_PER_DIRECTORY, .allocator = &mem.fixed_buffer_allocator.allocator };
 
 ///
 /// Convert a virtual address to an index within an array of directory entries.
@@ -500,8 +530,9 @@ test "virtToTableEntryIdx" {
 }
 
 test "mapDirEntry" {
-    var allocator = std.heap.page_allocator;
-    var dir: Directory = Directory{ .entries = [_]DirectoryEntry{0} ** ENTRIES_PER_DIRECTORY, .tables = [_]?*Table{null} ** ENTRIES_PER_DIRECTORY };
+    var allocator = std.testing.allocator;
+    var dir: Directory = Directory{ .entries = [_]DirectoryEntry{0} ** ENTRIES_PER_DIRECTORY, .tables = [_]?*Table{null} ** ENTRIES_PER_DIRECTORY, .allocator = allocator };
+    defer dir.deinit();
     const attrs = vmm.Attributes{ .kernel = false, .writable = false, .cachable = false };
     vmm.kernel_vmm = try vmm.VirtualMemoryManager(arch.VmmPayload).init(PAGE_SIZE_4MB, 0xFFFFFFFF, allocator, arch.VMM_MAPPER, undefined);
     {
@@ -533,8 +564,8 @@ test "mapDirEntry" {
 }
 
 test "mapDirEntry returns errors correctly" {
-    var allocator = std.heap.page_allocator;
-    var dir = Directory{ .entries = [_]DirectoryEntry{0} ** ENTRIES_PER_DIRECTORY, .tables = undefined };
+    var allocator = std.testing.allocator;
+    var dir = Directory{ .entries = [_]DirectoryEntry{0} ** ENTRIES_PER_DIRECTORY, .tables = undefined, .allocator = allocator };
     const attrs = vmm.Attributes{ .kernel = true, .writable = true, .cachable = true };
     testing.expectError(vmm.MapperError.MisalignedVirtualAddress, mapDirEntry(&dir, 1, PAGE_SIZE_4KB + 1, 0, PAGE_SIZE_4KB, attrs, allocator));
     testing.expectError(vmm.MapperError.MisalignedPhysicalAddress, mapDirEntry(&dir, 0, PAGE_SIZE_4KB, 1, PAGE_SIZE_4KB + 1, attrs, allocator));
@@ -544,8 +575,9 @@ test "mapDirEntry returns errors correctly" {
 }
 
 test "map and unmap" {
-    var allocator = std.heap.page_allocator;
-    var dir = Directory{ .entries = [_]DirectoryEntry{0} ** ENTRIES_PER_DIRECTORY, .tables = [_]?*Table{null} ** ENTRIES_PER_DIRECTORY };
+    var allocator = std.testing.allocator;
+    var dir = Directory{ .entries = [_]DirectoryEntry{0} ** ENTRIES_PER_DIRECTORY, .tables = [_]?*Table{null} ** ENTRIES_PER_DIRECTORY, .allocator = allocator };
+    defer dir.deinit();
     const phys_start: usize = PAGE_SIZE_4MB * 2;
     const virt_start: usize = PAGE_SIZE_4MB * 4;
     const phys_end: usize = PAGE_SIZE_4MB * 4;
@@ -577,6 +609,26 @@ test "map and unmap" {
         const table = dir.tables[entry_idx] orelse unreachable;
         checkDirEntry(entry, virt, virt + PAGE_SIZE_4MB, phys, attrs, table, false);
     }
+}
+
+test "copy" {
+    // Create a dummy page dir
+    var dir: Directory = Directory{ .entries = [_]DirectoryEntry{0} ** ENTRIES_PER_DIRECTORY, .tables = [_]?*Table{null} ** ENTRIES_PER_DIRECTORY, .allocator = std.testing.allocator };
+    dir.entries[0] = 123;
+    dir.entries[56] = 794;
+    var table0 = Table{ .entries = [_]TableEntry{654} ** ENTRIES_PER_TABLE };
+    var table56 = Table{ .entries = [_]TableEntry{987} ** ENTRIES_PER_TABLE };
+    dir.tables[0] = &table0;
+    dir.tables[56] = &table56;
+    var dir2 = dir.copy();
+    const dir_slice = @ptrCast([*]const u8, &dir)[0..@sizeOf(Directory)];
+    const dir2_slice = @ptrCast([*]const u8, &dir2)[0..@sizeOf(Directory)];
+    testing.expectEqualSlices(u8, dir_slice, dir2_slice);
+
+    // Changes to one should not affect the other
+    dir2.tables[1] = &table0;
+    dir.tables[0] = &table56;
+    testing.expect(!std.mem.eql(u8, dir_slice, dir2_slice));
 }
 
 // The labels to jump to after attempting to cause a page fault. This is needed as we don't want to cause an

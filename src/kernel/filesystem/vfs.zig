@@ -10,8 +10,16 @@ pub const OpenFlags = enum {
     CREATE_DIR,
     /// Create a file if it doesn't exist
     CREATE_FILE,
+    /// Create a symlink if it doesn't exist
+    CREATE_SYMLINK,
     /// Do not create a file or directory
     NO_CREATION,
+};
+
+/// The args used when opening new or existing fs nodes
+pub const OpenArgs = struct {
+    /// What to set the target to when creating a symlink
+    symlink_target: ?[]const u8 = null,
 };
 
 /// A filesystem node that could either be a directory or a file
@@ -20,6 +28,9 @@ pub const Node = union(enum) {
     File: FileNode,
     /// The dir node if this represents a directory
     Dir: DirNode,
+    /// The absolute path that this symlink is linked to
+    Symlink: []const u8,
+
     const Self = @This();
 
     ///
@@ -34,7 +45,7 @@ pub const Node = union(enum) {
     pub fn isDir(self: Self) bool {
         return switch (self) {
             .Dir => true,
-            .File => false,
+            else => false,
         };
     }
 
@@ -50,7 +61,23 @@ pub const Node = union(enum) {
     pub fn isFile(self: Self) bool {
         return switch (self) {
             .File => true,
-            .Dir => false,
+            else => false,
+        };
+    }
+
+    ///
+    /// Check if this node is a symlink
+    ///
+    /// Arguments:
+    ///     IN self: Self - The node being checked
+    ///
+    /// Return: bool
+    ///     True if this is a symlink else false
+    ///
+    pub fn isSymlink(self: Self) bool {
+        return switch (self) {
+            .Symlink => true,
+            else => false,
         };
     }
 };
@@ -74,16 +101,16 @@ pub const FileSystem = struct {
     /// Arguments:
     ///     IN self: *const FileSystem - The filesystem in question being operated on
     ///     IN node: *const FileNode - The file being read from
-    ///     IN len: usize - The number of bytes to read from the file
+    ///     IN bytes: []u8 - The buffer to fill data from the file with
     ///
-    /// Return: []u8
-    ///     The data read as a slice of bytes. The length will be <= len, including 0 if there was no data to read
+    /// Return: usize
+    ///     The length of the actual data read. This being < bytes.len is not considered an error. It is never > bytes.len
     ///
     /// Error: Allocator.Error || Error
     ///     Allocator.Error.OutOfMemory - There wasn't enough memory to fulfill the request
     ///     Error.NotOpened - If the node provided is not one that the file system recognised as being opened.
     ///
-    const Read = fn (self: *const Self, node: *const FileNode, len: usize) (Allocator.Error || Error)![]u8;
+    const Read = fn (self: *const Self, node: *const FileNode, buffer: []u8) (Allocator.Error || Error)!usize;
 
     ///
     /// Write to an open file
@@ -93,10 +120,13 @@ pub const FileSystem = struct {
     ///     IN node: *const FileNode - The file being read from
     ///     IN bytes: []u8 - The bytes to write to the file
     ///
+    /// Return: usize
+    ///     The length of the actual data written to the file. This being < bytes.len is not considered an error. It is never > bytes.len
+    ///
     /// Error: Allocator.Error
     ///     Allocator.Error.OutOfMemory - There wasn't enough memory to fulfill the request
     ///
-    const Write = fn (self: *const Self, node: *const FileNode, bytes: []const u8) (Allocator.Error || Error)!void;
+    const Write = fn (self: *const Self, node: *const FileNode, bytes: []const u8) (Allocator.Error || Error)!usize;
 
     ///
     /// Open a file/dir within the filesystem. The result can then be used for write, read or close operations
@@ -106,6 +136,7 @@ pub const FileSystem = struct {
     ///     IN node: *const DirNode - The directory under which to open the file/dir from
     ///     IN name: []const u8 - The name of the file to open
     ///     IN flags: OpenFlags - The flags to consult when opening the file
+    ///     IN args: OpenArgs - The arguments to use when creating a node
     ///
     /// Return: *const Node
     ///     The node representing the file/dir opened
@@ -113,8 +144,9 @@ pub const FileSystem = struct {
     /// Error: Allocator.Error || Error
     ///     Allocator.Error.OutOfMemory - There wasn't enough memory to fulfill the request
     ///     Error.NoSuchFileOrDir - The file/dir by that name doesn't exist and the flags didn't specify to create it
+    ///     Error.NoSymlinkTarget - A symlink was created but no symlink target was provided in the args
     ///
-    const Open = fn (self: *const Self, node: *const DirNode, name: []const u8, flags: OpenFlags) (Allocator.Error || Error)!*Node;
+    const Open = fn (self: *const Self, node: *const DirNode, name: []const u8, flags: OpenFlags, args: OpenArgs) (Allocator.Error || Error)!*Node;
 
     ///
     /// Get the node representing the root of the filesystem. Used when mounting to bind the mount point to the root of the mounted fs
@@ -153,8 +185,8 @@ pub const FileNode = struct {
     fs: *const FileSystem,
 
     /// See the documentation for FileSystem.Read
-    pub fn read(self: *const FileNode, len: usize) (Allocator.Error || Error)![]u8 {
-        return self.fs.read(self.fs, self, len);
+    pub fn read(self: *const FileNode, bytes: []u8) (Allocator.Error || Error)!usize {
+        return self.fs.read(self.fs, self, bytes);
     }
 
     /// See the documentation for FileSystem.Close
@@ -163,7 +195,7 @@ pub const FileNode = struct {
     }
 
     /// See the documentation for FileSystem.Write
-    pub fn write(self: *const FileNode, bytes: []const u8) (Allocator.Error || Error)!void {
+    pub fn write(self: *const FileNode, bytes: []const u8) (Allocator.Error || Error)!usize {
         return self.fs.write(self.fs, self, bytes);
     }
 };
@@ -177,14 +209,14 @@ pub const DirNode = struct {
     mount: ?*const DirNode,
 
     /// See the documentation for FileSystem.Open
-    pub fn open(self: *const DirNode, name: []const u8, flags: OpenFlags) (Allocator.Error || Error)!*Node {
+    pub fn open(self: *const DirNode, name: []const u8, flags: OpenFlags, args: OpenArgs) (Allocator.Error || Error)!*Node {
         var fs = self.fs;
         var node = self;
         if (self.mount) |mnt| {
             fs = mnt.fs;
             node = mnt;
         }
-        return fs.open(fs, node, name, flags);
+        return fs.open(fs, node, name, flags, args);
     }
 };
 
@@ -199,6 +231,9 @@ pub const Error = error{
     /// The requested file is actually a directory
     IsADirectory,
 
+    /// The requested symlink is actually a file
+    IsAFile,
+
     /// The path provided is not absolute
     NotAbsolutePath,
 
@@ -207,6 +242,9 @@ pub const Error = error{
 
     /// The node is not recognised as being opened by the filesystem
     NotOpened,
+
+    /// No symlink target was provided when one was expected
+    NoSymlinkTarget,
 };
 
 /// Errors that can be thrown when attempting to mount
@@ -227,6 +265,7 @@ var root: *Node = undefined;
 /// Arguments:
 ///     IN path: []const u8 - The path to traverse. Must be absolute (see isAbsolute)
 ///     IN flags: OpenFlags - The flags that specify if the file/dir should be created if it doesn't exist
+///     IN args: OpenArgs - The extra args needed when creating new nodes.
 ///
 /// Return: *const Node
 ///     The node that exists at the path starting at the system root
@@ -235,8 +274,9 @@ var root: *Node = undefined;
 ///     Allocator.Error.OutOfMemory - There wasn't enough memory to fulfill the request
 ///     Error.NotADirectory - A segment within the path which is not at the end does not correspond to a directory
 ///     Error.NoSuchFileOrDir - The file/dir at the end of the path doesn't exist and the flags didn't specify to create it
+///     Error.NoSymlinkTarget - A non-null symlink target was not provided when creating a symlink
 ///
-fn traversePath(path: []const u8, flags: OpenFlags) (Allocator.Error || Error)!*Node {
+fn traversePath(path: []const u8, follow_symlinks: bool, flags: OpenFlags, args: OpenArgs) (Allocator.Error || Error)!*Node {
     if (!isAbsolute(path)) {
         return Error.NotAbsolutePath;
     }
@@ -247,7 +287,7 @@ fn traversePath(path: []const u8, flags: OpenFlags) (Allocator.Error || Error)!*
 
         const Self = @This();
 
-        fn func(split: *std.mem.SplitIterator, node: *Node, rec_flags: OpenFlags) (Allocator.Error || Error)!Self {
+        fn func(split: *std.mem.SplitIterator, node: *Node, follow_links: bool, rec_flags: OpenFlags) (Allocator.Error || Error)!Self {
             // Get segment string. This will not be unreachable as we've made sure the spliterator has more segments left
             const seg = split.next() orelse unreachable;
             if (split.rest().len == 0) {
@@ -258,7 +298,15 @@ fn traversePath(path: []const u8, flags: OpenFlags) (Allocator.Error || Error)!*
             }
             return switch (node.*) {
                 .File => Error.NotADirectory,
-                .Dir => |*dir| try func(split, try dir.open(seg, rec_flags), rec_flags),
+                .Dir => |*dir| blk: {
+                    var child = try dir.open(seg, rec_flags, .{});
+                    // If the segment refers to a symlink, redirect to the node it represents instead
+                    if (child.isSymlink() and follow_links) {
+                        child = try traversePath(child.Symlink, follow_links, rec_flags, .{});
+                    }
+                    break :blk try func(split, child, follow_links, rec_flags);
+                },
+                .Symlink => |target| if (follow_links) try func(split, try traversePath(target, follow_links, .NO_CREATION, .{}), follow_links, rec_flags) else Error.NotADirectory,
             };
         }
     };
@@ -266,7 +314,7 @@ fn traversePath(path: []const u8, flags: OpenFlags) (Allocator.Error || Error)!*
     // Split path but skip the first separator character
     var split = std.mem.split(path[1..], &[_]u8{SEPARATOR});
     // Traverse directories while we're not at the last segment
-    const result = try TraversalParent.func(&split, root, .NO_CREATION);
+    const result = try TraversalParent.func(&split, root, follow_symlinks, .NO_CREATION);
 
     // There won't always be a second segment in the path, e.g. in "/"
     if (std.mem.eql(u8, result.child, "")) {
@@ -279,7 +327,15 @@ fn traversePath(path: []const u8, flags: OpenFlags) (Allocator.Error || Error)!*
             file.close();
             break :blk Error.NotADirectory;
         },
-        .Dir => |*dir| try dir.open(result.child, flags),
+        .Symlink => |target| if (follow_symlinks) try traversePath(target, follow_symlinks, .NO_CREATION, .{}) else result.parent,
+        .Dir => |*dir| blk: {
+            var n = try dir.open(result.child, flags, args);
+            if (n.isSymlink() and follow_symlinks) {
+                // If the child is a symnlink and we're following them, find the node it refers to
+                n = try traversePath(n.Symlink, follow_symlinks, flags, args);
+            }
+            break :blk n;
+        },
     };
 }
 
@@ -305,7 +361,9 @@ pub fn mount(dir: *DirNode, fs: *const FileSystem) MountError!void {
 ///
 /// Arguments:
 ///     IN path: []const u8 - The path to open. Must be absolute (see isAbsolute)
+///     IN follow_symlinks: bool - Whether symbolic links should be followed. When this is false and the path traversal encounters a symlink before the end segment of the path, NotADirectory is returned.
 ///     IN flags: OpenFlags - The flags specifying if this node should be created if it doesn't exist
+///     IN args: OpenArgs - The extra args needed when creating new nodes.
 ///
 /// Return: *const Node
 ///     The node that exists at the path starting at the system root
@@ -314,9 +372,10 @@ pub fn mount(dir: *DirNode, fs: *const FileSystem) MountError!void {
 ///     Allocator.Error.OutOfMemory - There wasn't enough memory to fulfill the request
 ///     Error.NotADirectory - A segment within the path which is not at the end does not correspond to a directory
 ///     Error.NoSuchFileOrDir - The file/dir at the end of the path doesn't exist and the flags didn't specify to create it
+///     Error.NoSymlinkTarget - A non-null symlink target was not provided when creating a symlink
 ///
-pub fn open(path: []const u8, flags: OpenFlags) (Allocator.Error || Error)!*Node {
-    return try traversePath(path, flags);
+pub fn open(path: []const u8, follow_symlinks: bool, flags: OpenFlags, args: OpenArgs) (Allocator.Error || Error)!*Node {
+    return try traversePath(path, follow_symlinks, flags, args);
 }
 
 ///
@@ -338,13 +397,15 @@ pub fn open(path: []const u8, flags: OpenFlags) (Allocator.Error || Error)!*Node
 ///
 pub fn openFile(path: []const u8, flags: OpenFlags) (Allocator.Error || Error)!*const FileNode {
     switch (flags) {
-        .CREATE_DIR => return Error.InvalidFlags,
+        .CREATE_DIR, .CREATE_SYMLINK => return Error.InvalidFlags,
         .NO_CREATION, .CREATE_FILE => {},
     }
-    var node = try open(path, flags);
+    var node = try open(path, true, flags, .{});
     return switch (node.*) {
         .File => &node.File,
         .Dir => Error.IsADirectory,
+        // We instructed open to folow symlinks above, so this is impossible
+        .Symlink => unreachable,
     };
 }
 
@@ -367,16 +428,50 @@ pub fn openFile(path: []const u8, flags: OpenFlags) (Allocator.Error || Error)!*
 ///
 pub fn openDir(path: []const u8, flags: OpenFlags) (Allocator.Error || Error)!*DirNode {
     switch (flags) {
-        .CREATE_FILE => return Error.InvalidFlags,
+        .CREATE_FILE, .CREATE_SYMLINK => return Error.InvalidFlags,
         .NO_CREATION, .CREATE_DIR => {},
     }
-    var node = try open(path, flags);
+    var node = try open(path, true, flags, .{});
     return switch (node.*) {
         .File => |*file| blk: {
             file.close();
             break :blk Error.NotADirectory;
         },
+        // We instructed open to folow symlinks above, so this is impossible
+        .Symlink => unreachable,
         .Dir => &node.Dir,
+    };
+}
+
+///
+/// Open a symlink at a path with a target.
+///
+/// Arguments:
+///     IN path: []const u8 - The path to open. Must be absolute (see isAbsolute)
+///     IN tareget: ?[]const u8 - The target to use when creating the symlink. Can be null if .NO_CREATION is used as the open flag
+///     IN flags: OpenFlags - The flags specifying if this node should be created if it doesn't exist. Cannot be CREATE_FILE
+///
+/// Return: []const u8
+///     The opened symlink's target
+///
+/// Error: Allocator.Error || Error
+///     Allocator.Error.OutOfMemory - There wasn't enough memory to fulfill the request
+///     Error.InvalidFlags - The flags were a value invalid when opening a symlink
+///     Error.NotADirectory - A segment within the path which is not at the end does not correspond to a directory
+///     Error.NoSuchFileOrDir - The symlink at the end of the path doesn't exist and the flags didn't specify to create it
+///     Error.IsAFile - The path corresponds to a file rather than a symlink
+///     Error.IsADirectory - The path corresponds to a directory rather than a symlink
+///
+pub fn openSymlink(path: []const u8, target: ?[]const u8, flags: OpenFlags) (Allocator.Error || Error)![]const u8 {
+    switch (flags) {
+        .CREATE_DIR, .CREATE_FILE => return Error.InvalidFlags,
+        .NO_CREATION, .CREATE_SYMLINK => {},
+    }
+    var node = try open(path, false, flags, .{ .symlink_target = target });
+    return switch (node.*) {
+        .Symlink => |t| t,
+        .File => Error.IsAFile,
+        .Dir => Error.IsADirectory,
     };
 }
 
@@ -481,18 +576,17 @@ const TestFS = struct {
         test_fs.open_files_count -= 1;
     }
 
-    fn read(fs: *const FileSystem, node: *const FileNode, len: usize) (Allocator.Error || Error)![]u8 {
+    fn read(fs: *const FileSystem, node: *const FileNode, bytes: []u8) (Allocator.Error || Error)!usize {
         var test_fs = @fieldParentPtr(TestFS, "instance", fs.instance);
         // Get the tree that corresponds to the node. Cannot error as the file is already open so it does exist
         var tree = (getTreeNode(test_fs, node) catch unreachable) orelse unreachable;
-        const count = if (tree.data) |d| std.math.min(len, d.len) else 0;
+        const count = if (tree.data) |d| std.math.min(bytes.len, d.len) else 0;
         const data = if (tree.data) |d| d[0..count] else "";
-        var bytes = try test_fs.allocator.alloc(u8, count);
         std.mem.copy(u8, bytes, data);
-        return bytes;
+        return count;
     }
 
-    fn write(fs: *const FileSystem, node: *const FileNode, bytes: []const u8) (Allocator.Error || Error)!void {
+    fn write(fs: *const FileSystem, node: *const FileNode, bytes: []const u8) (Allocator.Error || Error)!usize {
         var test_fs = @fieldParentPtr(TestFS, "instance", fs.instance);
         var tree = (try getTreeNode(test_fs, node)) orelse unreachable;
         if (tree.data) |_| {
@@ -500,9 +594,10 @@ const TestFS = struct {
         }
         tree.data = try test_fs.allocator.alloc(u8, bytes.len);
         std.mem.copy(u8, tree.data.?, bytes);
+        return bytes.len;
     }
 
-    fn open(fs: *const FileSystem, dir: *const DirNode, name: []const u8, flags: OpenFlags) (Allocator.Error || Error)!*Node {
+    fn open(fs: *const FileSystem, dir: *const DirNode, name: []const u8, flags: OpenFlags, args: OpenArgs) (Allocator.Error || Error)!*Node {
         var test_fs = @fieldParentPtr(TestFS, "instance", fs.instance);
         const parent = (try getTreeNode(test_fs, dir)) orelse unreachable;
         // Check if the children match the file wanted
@@ -528,6 +623,14 @@ const TestFS = struct {
                     // Create the fs node
                     child = try test_fs.allocator.create(Node);
                     child.* = .{ .File = .{ .fs = test_fs.fs } };
+                },
+                .CREATE_SYMLINK => {
+                    if (args.symlink_target) |target| {
+                        child = try test_fs.allocator.create(Node);
+                        child.* = .{ .Symlink = target };
+                    } else {
+                        return Error.NoSymlinkTarget;
+                    }
                 },
                 .NO_CREATION => unreachable,
             }
@@ -622,34 +725,45 @@ test "traversePath" {
     root = testfs.tree.val;
 
     // Get the root
-    var test_root = try traversePath("/", .NO_CREATION);
+    var test_root = try traversePath("/", false, .NO_CREATION, .{});
     testing.expectEqual(test_root, root);
     // Create a file in the root and try to traverse to it
-    var child1 = try test_root.Dir.open("child1.txt", .CREATE_FILE);
-    var child1_traversed = try traversePath("/child1.txt", .NO_CREATION);
+    var child1 = try test_root.Dir.open("child1.txt", .CREATE_FILE, .{});
+    var child1_traversed = try traversePath("/child1.txt", false, .NO_CREATION, .{});
     testing.expectEqual(child1, child1_traversed);
     // Close the open files
     child1.File.close();
     child1_traversed.File.close();
 
     // Same but with a directory
-    var child2 = try test_root.Dir.open("child2", .CREATE_DIR);
-    testing.expectEqual(child2, try traversePath("/child2", .NO_CREATION));
+    var child2 = try test_root.Dir.open("child2", .CREATE_DIR, .{});
+    testing.expectEqual(child2, try traversePath("/child2", false, .NO_CREATION, .{}));
 
     // Again but with a file within that directory
-    var child3 = try child2.Dir.open("child3.txt", .CREATE_FILE);
-    var child3_traversed = try traversePath("/child2/child3.txt", .NO_CREATION);
+    var child3 = try child2.Dir.open("child3.txt", .CREATE_FILE, .{});
+    var child3_traversed = try traversePath("/child2/child3.txt", false, .NO_CREATION, .{});
     testing.expectEqual(child3, child3_traversed);
     // Close the open files
     child3.File.close();
     child3_traversed.File.close();
 
-    testing.expectError(Error.NotAbsolutePath, traversePath("abc", .NO_CREATION));
-    testing.expectError(Error.NotAbsolutePath, traversePath("", .NO_CREATION));
-    testing.expectError(Error.NotAbsolutePath, traversePath("a/", .NO_CREATION));
-    testing.expectError(Error.NoSuchFileOrDir, traversePath("/notadir/abc.txt", .NO_CREATION));
-    testing.expectError(Error.NoSuchFileOrDir, traversePath("/ ", .NO_CREATION));
-    testing.expectError(Error.NotADirectory, traversePath("/child1.txt/abc.txt", .NO_CREATION));
+    // Create and open a symlink
+    var child4 = try traversePath("/child2/link", false, .CREATE_SYMLINK, .{ .symlink_target = "/child2/child3.txt" });
+    var child4_linked = try traversePath("/child2/link", true, .NO_CREATION, .{});
+    testing.expectEqual(child4_linked, child3);
+    var child5 = try traversePath("/child4", false, .CREATE_SYMLINK, .{ .symlink_target = "/child2" });
+    var child5_linked = try traversePath("/child4/child3.txt", true, .NO_CREATION, .{});
+    testing.expectEqual(child5_linked, child4_linked);
+    child4_linked.File.close();
+    child5_linked.File.close();
+
+    testing.expectError(Error.NotAbsolutePath, traversePath("abc", false, .NO_CREATION, .{}));
+    testing.expectError(Error.NotAbsolutePath, traversePath("", false, .NO_CREATION, .{}));
+    testing.expectError(Error.NotAbsolutePath, traversePath("a/", false, .NO_CREATION, .{}));
+    testing.expectError(Error.NoSuchFileOrDir, traversePath("/notadir/abc.txt", false, .NO_CREATION, .{}));
+    testing.expectError(Error.NoSuchFileOrDir, traversePath("/ ", false, .NO_CREATION, .{}));
+    testing.expectError(Error.NotADirectory, traversePath("/child1.txt/abc.txt", false, .NO_CREATION, .{}));
+    testing.expectError(Error.NoSymlinkTarget, traversePath("/childX.txt", false, .CREATE_SYMLINK, .{}));
 
     // Since we've closed all the files, the open files count should be zero
     testing.expectEqual(testfs.open_files_count, 0);
@@ -671,16 +785,30 @@ test "isDir" {
     const fs: FileSystem = undefined;
     const dir = Node{ .Dir = .{ .fs = &fs, .mount = null } };
     const file = Node{ .File = .{ .fs = &fs } };
-    testing.expect(dir.isDir());
+    const symlink = Node{ .Symlink = "" };
+    testing.expect(!symlink.isDir());
     testing.expect(!file.isDir());
+    testing.expect(dir.isDir());
 }
 
 test "isFile" {
     const fs: FileSystem = undefined;
     const dir = Node{ .Dir = .{ .fs = &fs, .mount = null } };
     const file = Node{ .File = .{ .fs = &fs } };
+    const symlink = Node{ .Symlink = "" };
     testing.expect(!dir.isFile());
+    testing.expect(!symlink.isFile());
     testing.expect(file.isFile());
+}
+
+test "isSymlink" {
+    const fs: FileSystem = undefined;
+    const dir = Node{ .Dir = .{ .fs = &fs, .mount = null } };
+    const file = Node{ .File = .{ .fs = &fs } };
+    const symlink = Node{ .Symlink = "" };
+    testing.expect(!dir.isSymlink());
+    testing.expect(!file.isSymlink());
+    testing.expect(symlink.isSymlink());
 }
 
 test "open" {
@@ -728,8 +856,9 @@ test "open" {
     testing.expectError(Error.IsADirectory, openFile("/def", .NO_CREATION));
     testing.expectError(Error.InvalidFlags, openFile("/abc.txt", .CREATE_DIR));
     testing.expectError(Error.InvalidFlags, openDir("/abc.txt", .CREATE_FILE));
-    testing.expectError(Error.NotAbsolutePath, open("", .NO_CREATION));
-    testing.expectError(Error.NotAbsolutePath, open("abc", .NO_CREATION));
+    testing.expectError(Error.NotAbsolutePath, open("", false, .NO_CREATION, .{}));
+    testing.expectError(Error.NotAbsolutePath, open("abc", false, .NO_CREATION, .{}));
+    testing.expectError(Error.NoSymlinkTarget, open("/abc", false, .CREATE_SYMLINK, .{}));
 }
 
 test "read" {
@@ -743,31 +872,39 @@ test "read" {
     var str = "test123";
     f_data.* = try std.mem.dupe(testing.allocator, u8, str);
 
+    var buffer: [64]u8 = undefined;
     {
-        var data = try test_file.read(str.len);
-        defer testing.allocator.free(data);
-        testing.expect(std.mem.eql(u8, str, data));
+        const length = try test_file.read(buffer[0..str.len]);
+        testing.expect(std.mem.eql(u8, str, buffer[0..length]));
     }
 
     {
-        var data = try test_file.read(str.len + 1);
-        defer testing.allocator.free(data);
-        testing.expect(std.mem.eql(u8, str, data));
+        const length = try test_file.read(buffer[0 .. str.len + 1]);
+        testing.expect(std.mem.eql(u8, str, buffer[0..length]));
     }
 
     {
-        var data = try test_file.read(str.len + 3);
-        defer testing.allocator.free(data);
-        testing.expect(std.mem.eql(u8, str, data));
+        const length = try test_file.read(buffer[0 .. str.len + 3]);
+        testing.expect(std.mem.eql(u8, str, buffer[0..length]));
     }
 
     {
-        var data = try test_file.read(str.len - 1);
-        defer testing.allocator.free(data);
-        testing.expect(std.mem.eql(u8, str[0 .. str.len - 1], data));
+        const length = try test_file.read(buffer[0 .. str.len - 1]);
+        testing.expect(std.mem.eql(u8, str[0 .. str.len - 1], buffer[0..length]));
     }
 
-    testing.expect(std.mem.eql(u8, str[0..0], try test_file.read(0)));
+    {
+        const length = try test_file.read(buffer[0..0]);
+        testing.expect(std.mem.eql(u8, str[0..0], buffer[0..length]));
+    }
+    // Try reading from a symlink
+    var test_link = try openSymlink("/link", "/foo.txt", .CREATE_SYMLINK);
+    testing.expectEqual(test_link, "/foo.txt");
+    var link_file = try openFile("/link", .NO_CREATION);
+    {
+        const length = try link_file.read(buffer[0..0]);
+        testing.expect(std.mem.eql(u8, str[0..0], buffer[0..length]));
+    }
 }
 
 test "write" {
@@ -781,6 +918,16 @@ test "write" {
     testing.expectEqual(f_data.*, null);
 
     var str = "test123";
-    try test_file.write(str);
+    const length = try test_file.write(str);
     testing.expect(std.mem.eql(u8, str, f_data.* orelse unreachable));
+    testing.expect(length == str.len);
+
+    // Try writing to a symlink
+    var test_link = try openSymlink("/link", "/foo.txt", .CREATE_SYMLINK);
+    testing.expectEqual(test_link, "/foo.txt");
+    var link_file = try openFile("/link", .NO_CREATION);
+
+    var str2 = "test456";
+    const length2 = try test_file.write(str2);
+    testing.expect(std.mem.eql(u8, str2, f_data.* orelse unreachable));
 }

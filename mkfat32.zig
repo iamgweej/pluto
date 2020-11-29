@@ -1,5 +1,4 @@
 const std = @import("std");
-const File = std.fs.File;
 
 // This is the assembly for the FAT bootleader.
 //     [bits   16]
@@ -192,8 +191,8 @@ pub const Fat32 = struct {
         InvalidOptionValue,
     };
 
-    /// The logger function for printing errors when creating a FAT32 image.
-    const logger = std.log.scoped(.mkfat32);
+    /// The log function for printing errors when creating a FAT32 image.
+    const log = std.log.scoped(.mkfat32);
 
     /// The bootloader code for the FAT32 boot sector.
     const bootsector_boot_code = [512]u8{
@@ -230,6 +229,29 @@ pub const Fat32 = struct {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x55, 0xAA,
     };
+
+    ///
+    /// A convenient function for returning the error types for reading, writing and seeking a stream.
+    ///
+    /// Argument:
+    ///     IN comptime StreamType: type - The stream to get the error set from.
+    ///
+    /// Return: type
+    ///     The Error set for reading, writing and seeking the stream.
+    ///
+    fn ErrorSet(comptime StreamType: type) type {
+        const WriteError = switch (@typeInfo(StreamType)) {
+            .Pointer => |p| p.child.WriteError,
+            else => StreamType.WriteError,
+        };
+
+        const SeekError = switch (@typeInfo(StreamType)) {
+            .Pointer => |p| p.child.SeekError,
+            else => StreamType.SeekError,
+        };
+
+        return WriteError || SeekError;
+    }
 
     ///
     /// Get the number of reserved sectors. The number of reserved sectors doesn't have to be 32,
@@ -311,7 +333,7 @@ pub const Fat32 = struct {
     }
 
     ///
-    /// Get the default image size: 34090496 (~32.5KB). This is the recommended minimum image size
+    /// Get the default image size: 34090496 (~32.5MB). This is the recommended minimum image size
     /// for FAT32. (Valid cluster values + (sectors per FAT * 2) + reserved sectors) * bytes per sector.
     ///
     /// Return: u32
@@ -350,23 +372,23 @@ pub const Fat32 = struct {
     }
 
     ///
-    /// Write the FSInfo and backup FSInfo sector to a image file. This uses a valid FAT32 boot
-    /// sector header for creating the FSInfo sector.
+    /// Write the FSInfo and backup FSInfo sector to a stream. This uses a valid FAT32 boot sector
+    /// header for creating the FSInfo sector.
     ///
     /// Argument:
-    ///     IN/OUT image: File        - The image file to write the FSInfo to.
+    ///     IN/OUT stream: anytype    - The stream to write the FSInfo to.
     ///     IN fat32_header: Header   - A valid FAT32 boot header for creating the FSInfo sector.
     ///     IN free_cluster_num: u32  - The number of free data clusters on the image.
     ///     IN next_free_cluster: u32 - The next free data cluster to start looking for when writing
     ///                                 files.
     ///
-    /// Error File.WriteError || File.SeekError
-    ///     File.WriteError - If there is an error when writing to the image. See File.WriteError
-    ///     File.SeekError  - If there is an error when seeking the image. See File.SeekError
+    /// Error @TypeOf(stream).WriteError || @TypeOf(stream).SeekError
+    ///     @TypeOf(stream).WriteError - If there is an error when writing. See the relevant error for the stream.
+    ///     @TypeOf(stream).SeekError  - If there is an error when seeking. See the relevant error for the stream.
     ///
-    fn writeFSInfo(image: File, fat32_header: Header, free_cluster_num: u32, next_free_cluster: u32) (File.WriteError || File.SeekError)!void {
-        const seekable_stream = image.seekableStream();
-        const writer = image.writer();
+    fn writeFSInfo(stream: anytype, fat32_header: Header, free_cluster_num: u32, next_free_cluster: u32) ErrorSet(@TypeOf(stream))!void {
+        const seekable_stream = stream.seekableStream();
+        const writer = stream.writer();
 
         // Seek to the correct location
         try seekable_stream.seekTo(fat32_header.fsinfo_sector * fat32_header.bytes_per_sector);
@@ -404,20 +426,20 @@ pub const Fat32 = struct {
     }
 
     ///
-    /// Write the FAT to the image. This sets up a blank FAT with end marker of 0x0FFFFFFF and root
+    /// Write the FAT to the stream. This sets up a blank FAT with end marker of 0x0FFFFFFF and root
     /// directory cluster of 0x0FFFFFFF (one cluster chain).
     ///
     /// Argument:
-    ///     IN/OUT image: File      - The image file to write the FSInfo to.
+    ///     IN/OUT stream: anytype  - The stream to write the FSInfo to.
     ///     IN fat32_header: Header - A valid FAT32 boot header for creating the FAT.
     ///
-    /// Error File.WriteError || File.SeekError
-    ///     File.WriteError - If there is an error when writing to the image. See File.WriteError
-    ///     File.SeekError  - If there is an error when seeking the image. See File.SeekError
+    /// Error @TypeOf(stream).WriteError || @TypeOf(stream).SeekError
+    ///     @TypeOf(stream).WriteError - If there is an error when writing. See the relevant error for the stream.
+    ///     @TypeOf(stream).SeekError  - If there is an error when seeking. See the relevant error for the stream.
     ///
-    fn writeFAT(image: File, fat32_header: Header) (File.WriteError || File.SeekError)!void {
-        const seekable_stream = image.seekableStream();
-        const writer = image.writer();
+    fn writeFAT(stream: anytype, fat32_header: Header) ErrorSet(@TypeOf(stream))!void {
+        const seekable_stream = stream.seekableStream();
+        const writer = stream.writer();
 
         // This FAT is below the reserved sectors
         try seekable_stream.seekTo(fat32_header.reserved_sectors * fat32_header.bytes_per_sector);
@@ -439,19 +461,19 @@ pub const Fat32 = struct {
     }
 
     ///
-    /// Write the FAT boot sector with the boot code and FAT32 header to the image.
+    /// Write the FAT boot sector with the boot code and FAT32 header to the stream.
     ///
     /// Argument:
-    ///     IN/OUT image: File      - The image file to write the FSInfo to.
+    ///     IN/OUT stream: anytype  - The stream to write the FSInfo to.
     ///     IN fat32_header: Header - A valid FAT32 boot header for creating the FAT.
     ///
-    /// Error: File.WriteError || File.SeekError
-    ///     File.WriteError - If there is an error when writing to the image. See File.WriteError.
-    ///     File.SeekError  - If there is an error when seeking the image. See File.SeekError.
+    /// Error: @TypeOf(stream).WriteError || @TypeOf(stream).SeekError
+    ///     @TypeOf(stream).WriteError - If there is an error when writing. See the relevant error for the stream.
+    ///     @TypeOf(stream).SeekError  - If there is an error when seeking. See the relevant error for the stream.
     ///
-    fn writeBootSector(image: File, fat32_header: Header) (File.WriteError || File.SeekError)!void {
-        const seekable_stream = image.seekableStream();
-        const writer = image.writer();
+    fn writeBootSector(stream: anytype, fat32_header: Header) ErrorSet(@TypeOf(stream))!void {
+        const seekable_stream = stream.seekableStream();
+        const writer = stream.writer();
 
         var boot_sector: [512]u8 = undefined;
         std.mem.copy(u8, &boot_sector, &bootsector_boot_code);
@@ -496,13 +518,13 @@ pub const Fat32 = struct {
     fn createFATHeader(options: Options) Error!Header {
         // 512 is the smallest sector size for FAT32
         if (options.sector_size < 512 or options.sector_size > 4096 or options.sector_size % 512 != 0) {
-            logger.err("Bytes per sector is invalid. Must be greater then 512 and a multiple of 512. Found: {}", .{options.sector_size});
+            log.err("Bytes per sector is invalid. Must be greater then 512 and a multiple of 512. Found: {}", .{options.sector_size});
             return Error.InvalidOptionValue;
         }
 
         // Valid clusters are 1, 2, 4, 8, 16, 32, 64 and 128
         if (options.cluster_size < 0 or options.cluster_size > 128 or !std.math.isPowerOfTwo(options.cluster_size)) {
-            logger.err("Sectors per cluster is invalid. Must be less then 32 and a power of 2. Found: {}", .{options.cluster_size});
+            log.err("Sectors per cluster is invalid. Must be less then 32 and a power of 2. Found: {}", .{options.cluster_size});
             return Error.InvalidOptionValue;
         }
 
@@ -514,7 +536,7 @@ pub const Fat32 = struct {
         // +1 for the root director sector,                                                      2 TB
         // FAT count for FAT32 is always 2
         if (image_size < ((getReservedSectors() + 2 + 1) * options.sector_size) or image_size >= 2 * 1024 * 1024 * 1024 * 1024) {
-            logger.err("Image size is invalid. Must be greater then 17919 (~18KB). Found: {}", .{image_size});
+            log.err("Image size is invalid. Must be greater then 17919 (~18KB). Found: {}", .{image_size});
             return Error.InvalidOptionValue;
         }
 
@@ -538,43 +560,38 @@ pub const Fat32 = struct {
     /// user. The file will be saved to the path specified.
     ///
     /// Argument:
-    ///     IN options: Options          - The FAT32 options that the user can provide to change
-    ///                                    the parameters of a FAT32 image.
-    ///     IN out_file_path: []const u8 - The location for which the FAT32 image will be created.
+    ///     IN options: Options - The FAT32 options that the user can provide to change the
+    ///                           parameters of a FAT32 image.
+    ///     IN stream: anytype  - The stream to create a new FAT32 image. This stream must support
+    ///                           reader(), writer() and seekableStream() interfaces.
     ///
-    /// Error: File.OpenError || File.WriteError || File.SeekError || Error
-    ///     File.OpenError || File.WriteError || File.SeekError - Error relating to file operations. See std.fs.File.
-    ///     Error.InvalidOptionValue - In the user has provided invalid options.
-    ///     Error.TooLarge           - The image size is too small. < 17.5KB.
-    ///     Error.TooSmall           - The image size is to large. > 2TB.
+    /// Error:  @TypeOf(stream).WriteError ||  @TypeOf(stream).SeekError || Error
+    ///     @TypeOf(stream).WriteError       - If there is an error when writing. See the relevant error for the stream.
+    ///     @TypeOf(stream).SeekError        - If there is an error when seeking. See the relevant error for the stream.
+    ///     Error.InvalidOptionValue         - In the user has provided invalid options.
+    ///     Error.TooLarge                   - The stream size is too small. < 17.5KB.
+    ///     Error.TooSmall                   - The stream size is to large. > 2TB.
     ///
-    pub fn make(options: Options, out_file_path: []const u8) (File.OpenError || File.WriteError || File.SeekError || Error)!void {
+    pub fn make(options: Options, stream: anytype) (ErrorSet(@TypeOf(stream)) || Error)!void {
         // First set up the header
         const fat32_header = try Fat32.createFATHeader(options);
-        // Get the total image size again. As the above has a check for the image size, we don't need one here again
+        // Get the total image size again. As the above has a check for the size, we don't need one here again
         const image_size = std.mem.alignBackward(options.image_size, fat32_header.bytes_per_sector);
 
-        // Open the out file
-        const image = try std.fs.cwd().createFile(out_file_path, .{ .read = true });
-
-        // If there was an error, delete the image as this will be invalid
-        errdefer (std.fs.cwd().deleteFile(out_file_path) catch unreachable);
-        defer image.close();
-
-        // Initialise the image with all zeros
-        try image.writer().writeByteNTimes(0x00, image_size);
+        // Initialise the stream with all zeros
+        try stream.writer().writeByteNTimes(0x00, image_size);
 
         // Write the boot sector with the bootstrap code and header and the backup boot sector.
-        try Fat32.writeBootSector(image, fat32_header);
+        try Fat32.writeBootSector(stream, fat32_header);
 
         // Write the FAT and second FAT
-        try Fat32.writeFAT(image, fat32_header);
+        try Fat32.writeFAT(stream, fat32_header);
 
         // Calculate the usable clusters.
         const usable_sectors = fat32_header.total_sectors - fat32_header.reserved_sectors - (fat32_header.fat_count * fat32_header.sectors_per_fat);
         const usable_clusters = @divFloor(usable_sectors, fat32_header.sectors_per_cluster) - 1;
 
         // Write the FSInfo and backup FSInfo sectors
-        try Fat32.writeFSInfo(image, fat32_header, usable_clusters, 2);
+        try Fat32.writeFSInfo(stream, fat32_header, usable_clusters, 2);
     }
 };

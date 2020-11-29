@@ -107,6 +107,9 @@ pub const VmmError = error{
 
     /// Physical addresses are invalid
     InvalidPhysAddresses,
+
+    /// Not enough virtual space in the VMM
+    OutOfMemory,
 };
 
 /// The boot-time offset that the virtual addresses are from the physical addresses
@@ -178,6 +181,54 @@ pub fn VirtualMemoryManager(comptime Payload: type) type {
                 .mapper = mapper,
                 .payload = payload,
             };
+        }
+
+        ///
+        /// Copy this VMM. Changes to one copy will not affect the other
+        ///
+        /// Arguments:
+        ///     IN self: *Self - The VMM to copy
+        ///
+        /// Error: Allocator.Error
+        ///     OutOfMemory - There wasn't enough memory for copying
+        ///
+        /// Return: Self
+        ///     The copy
+        ///
+        pub fn copy(self: *const Self) Allocator.Error!Self {
+            var clone = Self{
+                .bmp = try self.bmp.clone(),
+                .start = self.start,
+                .end = self.end,
+                .allocator = self.allocator,
+                .allocations = std.hash_map.AutoHashMap(usize, Allocation).init(self.allocator),
+                .mapper = self.mapper,
+                .payload = self.payload,
+            };
+            var it = self.allocations.iterator();
+            while (it.next()) |entry| {
+                var list = std.ArrayList(usize).init(self.allocator);
+                for (entry.value.physical.items) |block| {
+                    _ = try list.append(block);
+                }
+                _ = try clone.allocations.put(entry.key, Allocation{ .physical = list });
+            }
+            return clone;
+        }
+
+        ///
+        /// Free the internal state of the VMM. It is unusable afterwards
+        ///
+        /// Arguments:
+        ///     IN self: *Self - The VMM to deinitialise
+        ///
+        pub fn deinit(self: *Self) void {
+            self.bmp.deinit();
+            var it = self.allocations.iterator();
+            while (it.next()) |entry| {
+                entry.value.physical.deinit();
+            }
+            self.allocations.deinit();
         }
 
         ///
@@ -370,6 +421,89 @@ pub fn VirtualMemoryManager(comptime Payload: type) type {
         }
 
         ///
+        /// Copy data from an address in a virtual memory manager to an address in another virtual memory manager
+        ///
+        /// Arguments:
+        ///     IN self: *Self - One of the VMMs to copy between. This should be the currently active VMM
+        ///     IN other: *Self - The second of the VMMs to copy between
+        ///     IN data: []u8 - The being copied from or written to (depending on `from`). Must be mapped within the VMM being copied from/to
+        ///     IN address: usize - The address within `other` that is to be copied from or to
+        ///     IN from: bool - Whether the date should be copied from `self` to `other, or the other way around
+        ///
+        /// Error: VmmError || pmm.PmmError || Allocator.Error
+        ///     VmmError.NotAllocated - Some or all of the destination isn't mapped
+        ///     VmmError.OutOfMemory - There wasn't enough space in the VMM to use for temporary mapping
+        ///     Bitmap(u32).Error.OutOfBounds - The address given is outside of the memory managed
+        ///     Allocator.Error.OutOfMemory - There wasn't enough memory available to fulfill the request
+        ///
+        pub fn copyData(self: *Self, other: *const Self, data: []u8, address: usize, from: bool) (bitmap.Bitmap(usize).BitmapError || VmmError || Allocator.Error)!void {
+            if (data.len == 0) {
+                return;
+            }
+            const start_addr = std.mem.alignBackward(address, BLOCK_SIZE);
+            const end_addr = std.mem.alignForward(address + data.len, BLOCK_SIZE);
+            if (end_addr >= other.end or start_addr < other.start)
+                return bitmap.Bitmap(usize).BitmapError.OutOfBounds;
+            // Find physical blocks for the address
+            var blocks = std.ArrayList(usize).init(self.allocator);
+            defer blocks.deinit();
+            var it = other.allocations.iterator();
+            while (it.next()) |allocation| {
+                const virtual = allocation.key;
+                const physical = allocation.value.physical.items;
+                if (start_addr >= virtual and virtual + physical.len * BLOCK_SIZE >= end_addr) {
+                    const first_block_idx = (start_addr - virtual) / BLOCK_SIZE;
+                    const last_block_idx = (end_addr - virtual) / BLOCK_SIZE;
+
+                    try blocks.appendSlice(physical[first_block_idx..last_block_idx]);
+                }
+            }
+            // Make sure the address is actually mapped in the destination VMM
+            if (blocks.items.len == 0) {
+                return VmmError.NotAllocated;
+            }
+
+            // Map them into self for some vaddr so they can be accessed from this VMM
+            if (self.bmp.setContiguous(blocks.items.len)) |entry| {
+                const v_start = entry * BLOCK_SIZE + self.start;
+                defer {
+                    // Unmap virtual blocks from self so they can be used in the future
+                    var v = v_start;
+                    while (v < v_start + blocks.items.len * BLOCK_SIZE) : (v += BLOCK_SIZE) {
+                        // Cannot be out of bounds as it has been set above
+                        self.bmp.clearEntry((v - self.start) / BLOCK_SIZE) catch unreachable;
+                    }
+                }
+                for (blocks.items) |block, i| {
+                    const v = v_start + i * BLOCK_SIZE;
+                    const v_end = v + BLOCK_SIZE;
+                    const p = block;
+                    const p_end = p + BLOCK_SIZE;
+                    self.mapper.mapFn(v, v_end, p, p_end, .{ .kernel = true, .writable = true, .cachable = true }, self.allocator, self.payload) catch |e| {
+                        // If we fail to map one of the blocks then attempt to free all previously mapped
+                        if (i > 0) {
+                            self.mapper.unmapFn(v_start, v_end, self.payload) catch |e2| {
+                                // If we can't unmap then just panic
+                                panic(@errorReturnTrace(), "Failed to unmap region 0x{X} -> 0x{X}: {}\n", .{ v_start, v_end, e2 });
+                            };
+                        }
+                        panic(@errorReturnTrace(), "Failed to map vrutal region 0x{X} -> 0x{X} to 0x{X} -> 0x{X}: {}\n", .{ v, v_end, p, p_end, e });
+                    };
+                }
+                // Copy to vaddr from above
+                const align_offset = address - start_addr;
+                var data_copy = @intToPtr([*]u8, v_start + align_offset)[0..data.len];
+                if (from) {
+                    std.mem.copy(u8, data_copy, data);
+                } else {
+                    std.mem.copy(u8, data, data_copy);
+                }
+            } else {
+                return VmmError.OutOfMemory;
+            }
+        }
+
+        ///
         /// Free a previous allocation
         ///
         /// Arguments:
@@ -448,18 +582,15 @@ pub fn init(mem_profile: *const mem.MemProfile, allocator: *Allocator) Allocator
         };
     }
 
-    switch (build_options.test_mode) {
-        .Initialisation => runtimeTests(arch.VmmPayload, kernel_vmm, mem_profile),
-        else => {},
-    }
     return &kernel_vmm;
 }
 
 test "virtToPhys" {
     const num_entries = 512;
     var vmm = try testInit(num_entries);
+    defer testDeinit(&vmm);
 
-    const vstart = test_vaddr_start + BLOCK_SIZE;
+    const vstart = vmm.start + BLOCK_SIZE;
     const vend = vstart + BLOCK_SIZE * 3;
     const pstart = BLOCK_SIZE * 20;
     const pend = BLOCK_SIZE * 23;
@@ -480,8 +611,9 @@ test "virtToPhys" {
 test "physToVirt" {
     const num_entries = 512;
     var vmm = try testInit(num_entries);
+    defer testDeinit(&vmm);
 
-    const vstart = test_vaddr_start + BLOCK_SIZE;
+    const vstart = vmm.start + BLOCK_SIZE;
     const vend = vstart + BLOCK_SIZE * 3;
     const pstart = BLOCK_SIZE * 20;
     const pend = BLOCK_SIZE * 23;
@@ -502,6 +634,7 @@ test "physToVirt" {
 test "alloc and free" {
     const num_entries = 512;
     var vmm = try testInit(num_entries);
+    defer testDeinit(&vmm);
     var allocations = test_allocations.?;
     var virtual_allocations = std.ArrayList(usize).init(std.testing.allocator);
     defer virtual_allocations.deinit();
@@ -583,6 +716,7 @@ test "alloc and free" {
 test "set" {
     const num_entries = 512;
     var vmm = try testInit(num_entries);
+    defer testDeinit(&vmm);
 
     const vstart = vmm.start + BLOCK_SIZE * 37;
     const vend = vmm.start + BLOCK_SIZE * 46;
@@ -609,9 +743,84 @@ test "set" {
     }
 }
 
-var test_allocations: ?bitmap.Bitmap(u64) = null;
+test "copy" {
+    const num_entries = 512;
+    var vmm = try testInit(num_entries);
+    defer testDeinit(&vmm);
+
+    const attrs = .{ .kernel = true, .cachable = true, .writable = true };
+    const alloc0 = (try vmm.alloc(24, attrs)).?;
+
+    var mirrored = try vmm.copy();
+    defer mirrored.deinit();
+    std.testing.expectEqual(vmm.bmp.num_free_entries, mirrored.bmp.num_free_entries);
+    std.testing.expectEqual(vmm.start, mirrored.start);
+    std.testing.expectEqual(vmm.end, mirrored.end);
+    std.testing.expectEqual(vmm.allocations.count(), mirrored.allocations.count());
+    var it = vmm.allocations.iterator();
+    while (it.next()) |next| {
+        for (mirrored.allocations.get(next.key).?.physical.items) |block, i| {
+            std.testing.expectEqual(block, vmm.allocations.get(next.key).?.physical.items[i]);
+        }
+    }
+    std.testing.expectEqual(vmm.mapper, mirrored.mapper);
+    std.testing.expectEqual(vmm.payload, mirrored.payload);
+
+    // Allocating in the new VMM shouldn't allocate in the mirrored one
+    const alloc1 = (try mirrored.alloc(3, attrs)).?;
+    std.testing.expectEqual(vmm.allocations.count() + 1, mirrored.allocations.count());
+    std.testing.expectEqual(vmm.bmp.num_free_entries - 3, mirrored.bmp.num_free_entries);
+    std.testing.expectError(VmmError.NotAllocated, vmm.virtToPhys(alloc1));
+
+    // And vice-versa
+    const alloc2 = (try vmm.alloc(3, attrs)).?;
+    const alloc3 = (try vmm.alloc(1, attrs)).?;
+    const alloc4 = (try vmm.alloc(1, attrs)).?;
+    std.testing.expectEqual(vmm.allocations.count() - 2, mirrored.allocations.count());
+    std.testing.expectEqual(vmm.bmp.num_free_entries + 2, mirrored.bmp.num_free_entries);
+    std.testing.expectError(VmmError.NotAllocated, mirrored.virtToPhys(alloc3));
+    std.testing.expectError(VmmError.NotAllocated, mirrored.virtToPhys(alloc4));
+}
+
+test "copyData" {
+    var vmm = try testInit(100);
+    defer testDeinit(&vmm);
+    const alloc1_blocks = 1;
+    const alloc = (try vmm.alloc(alloc1_blocks, .{ .kernel = true, .writable = true, .cachable = true })) orelse unreachable;
+    var vmm2 = try VirtualMemoryManager(u8).init(vmm.start, vmm.end, std.testing.allocator, test_mapper, 39);
+    defer vmm2.deinit();
+    var vmm_free_entries = vmm.bmp.num_free_entries;
+    var vmm2_free_entries = vmm2.bmp.num_free_entries;
+
+    var buff: [4]u8 = [4]u8{ 10, 11, 12, 13 };
+    try vmm2.copyData(&vmm, buff[0..buff.len], alloc, true);
+
+    // Make sure they are the same
+    var buff2 = @intToPtr([*]u8, alloc)[0..buff.len];
+    std.testing.expectEqualSlices(u8, buff[0..buff.len], buff2);
+    std.testing.expectEqual(vmm_free_entries, vmm.bmp.num_free_entries);
+    std.testing.expectEqual(vmm2_free_entries, vmm2.bmp.num_free_entries);
+
+    try vmm2.copyData(&vmm, buff2, alloc, false);
+    std.testing.expectEqualSlices(u8, buff[0..buff.len], buff2);
+    std.testing.expectEqual(vmm_free_entries, vmm.bmp.num_free_entries);
+    std.testing.expectEqual(vmm2_free_entries, vmm2.bmp.num_free_entries);
+
+    // Test NotAllocated
+    std.testing.expectError(VmmError.NotAllocated, vmm2.copyData(&vmm, buff[0..buff.len], alloc + alloc1_blocks * BLOCK_SIZE, true));
+    std.testing.expectEqual(vmm_free_entries, vmm.bmp.num_free_entries);
+    std.testing.expectEqual(vmm2_free_entries, vmm2.bmp.num_free_entries);
+
+    // Test Bitmap.Error.OutOfBounds
+    std.testing.expectError(bitmap.Bitmap(usize).BitmapError.OutOfBounds, vmm2.copyData(&vmm, buff[0..buff.len], vmm.end, true));
+    std.testing.expectError(bitmap.Bitmap(usize).BitmapError.OutOfBounds, vmm.copyData(&vmm2, buff[0..buff.len], vmm2.end, true));
+    std.testing.expectEqual(vmm_free_entries, vmm.bmp.num_free_entries);
+    std.testing.expectEqual(vmm2_free_entries, vmm2.bmp.num_free_entries);
+}
+
+var test_allocations: ?*bitmap.Bitmap(u64) = null;
 var test_mapper = Mapper(u8){ .mapFn = testMap, .unmapFn = testUnmap };
-const test_vaddr_start: usize = 0xC0000000;
+var test_vmm: VirtualMemoryManager(u8) = undefined;
 
 ///
 /// Initialise a virtual memory manager used for testing
@@ -627,7 +836,8 @@ const test_vaddr_start: usize = 0xC0000000;
 ///
 fn testInit(num_entries: u32) Allocator.Error!VirtualMemoryManager(u8) {
     if (test_allocations == null) {
-        test_allocations = try bitmap.Bitmap(u64).init(num_entries, std.heap.page_allocator);
+        test_allocations = try std.testing.allocator.create(bitmap.Bitmap(u64));
+        test_allocations.?.* = try bitmap.Bitmap(u64).init(num_entries, std.testing.allocator);
     } else |allocations| {
         var entry: u32 = 0;
         while (entry < allocations.num_entries) : (entry += 1) {
@@ -646,8 +856,22 @@ fn testInit(num_entries: u32) Allocator.Error!VirtualMemoryManager(u8) {
         .physical_reserved = &[_]mem.Range{},
         .modules = &[_]mem.Module{},
     };
-    pmm.init(&mem_profile, std.heap.page_allocator);
-    return VirtualMemoryManager(u8).init(test_vaddr_start, test_vaddr_start + num_entries * BLOCK_SIZE, std.heap.page_allocator, test_mapper, 39);
+    pmm.init(&mem_profile, std.testing.allocator);
+    const test_vaddr_start = @ptrToInt(&(try std.testing.allocator.alloc(u8, num_entries * BLOCK_SIZE))[0]);
+    test_vmm = try VirtualMemoryManager(u8).init(test_vaddr_start, test_vaddr_start + num_entries * BLOCK_SIZE, std.testing.allocator, test_mapper, 39);
+    return test_vmm;
+}
+
+fn testDeinit(vmm: *VirtualMemoryManager(u8)) void {
+    vmm.deinit();
+    const space = @intToPtr([*]u8, vmm.start)[0 .. vmm.end - vmm.start];
+    vmm.allocator.free(space);
+    if (test_allocations) |allocs| {
+        allocs.deinit();
+        std.testing.allocator.destroy(allocs);
+        test_allocations = null;
+    }
+    pmm.deinit();
 }
 
 ///
@@ -665,8 +889,9 @@ fn testInit(num_entries: u32) Allocator.Error!VirtualMemoryManager(u8) {
 fn testMap(vstart: usize, vend: usize, pstart: usize, pend: usize, attrs: Attributes, allocator: *Allocator, payload: u8) (Allocator.Error || MapperError)!void {
     std.testing.expectEqual(@as(u8, 39), payload);
     var vaddr = vstart;
+    var allocations = test_allocations.?;
     while (vaddr < vend) : (vaddr += BLOCK_SIZE) {
-        (test_allocations.?).setEntry((vaddr - test_vaddr_start) / BLOCK_SIZE) catch unreachable;
+        allocations.setEntry((vaddr - test_vmm.start) / BLOCK_SIZE) catch unreachable;
     }
 }
 
@@ -681,9 +906,10 @@ fn testMap(vstart: usize, vend: usize, pstart: usize, pend: usize, attrs: Attrib
 fn testUnmap(vstart: usize, vend: usize, payload: u8) (Allocator.Error || MapperError)!void {
     std.testing.expectEqual(@as(u8, 39), payload);
     var vaddr = vstart;
+    var allocations = test_allocations.?;
     while (vaddr < vend) : (vaddr += BLOCK_SIZE) {
-        if ((test_allocations.?).isSet((vaddr - test_vaddr_start) / BLOCK_SIZE) catch unreachable) {
-            (test_allocations.?).clearEntry((vaddr - test_vaddr_start) / BLOCK_SIZE) catch unreachable;
+        if (allocations.isSet((vaddr - test_vmm.start) / BLOCK_SIZE) catch unreachable) {
+            allocations.clearEntry((vaddr - test_vmm.start) / BLOCK_SIZE) catch unreachable;
         } else {
             return MapperError.NotMapped;
         }
@@ -699,7 +925,19 @@ fn testUnmap(vstart: usize, vend: usize, payload: u8) (Allocator.Error || Mapper
 ///     IN mem_profile: *const mem.MemProfile - The mem profile with details about all the memory regions that should be reserved
 ///     IN mb_info: *multiboot.multiboot_info_t - The multiboot info struct that should also be reserved
 ///
-fn runtimeTests(comptime Payload: type, vmm: VirtualMemoryManager(Payload), mem_profile: *const mem.MemProfile) void {
+pub fn runtimeTests(comptime Payload: type, vmm: *VirtualMemoryManager(Payload), mem_profile: *const mem.MemProfile) void {
+    rt_correctMapping(Payload, vmm, mem_profile);
+    rt_copyData(vmm);
+}
+
+///
+/// Test that the correct mappings have been made in the VMM
+///
+/// Arguments:
+///     IN vmm: VirtualMemoryManager(Payload) - The virtual memory manager to test
+///     IN mem_profile: *const mem.MemProfile - The mem profile with details about all the memory regions that should be reserved
+///
+fn rt_correctMapping(comptime Payload: type, vmm: *VirtualMemoryManager(Payload), mem_profile: *const mem.MemProfile) void {
     const v_start = std.mem.alignBackward(@ptrToInt(mem_profile.vaddr_start), BLOCK_SIZE);
     const v_end = std.mem.alignForward(@ptrToInt(mem_profile.vaddr_end), BLOCK_SIZE);
 
@@ -732,6 +970,63 @@ fn runtimeTests(comptime Payload: type, vmm: VirtualMemoryManager(Payload), mem_
             panic(@errorReturnTrace(), "An address was not set in the VMM when it should have been: 0x{x}\n", .{vaddr});
         }
     }
-
     log.info("Tested allocations\n", .{});
+}
+
+///
+/// Test copying data to and from another VMM
+///
+/// Arguments:
+///     IN vmm: *VirtualMemoryManager() - The active VMM to test
+///
+fn rt_copyData(vmm: *VirtualMemoryManager(arch.VmmPayload)) void {
+    const expected_free_entries = vmm.bmp.num_free_entries;
+    // Mirror the VMM
+    var vmm2 = vmm.copy() catch |e| {
+        panic(@errorReturnTrace(), "Failed to mirror VMM: {}\n", .{e});
+    };
+
+    // Allocate within secondary VMM
+    const addr = vmm2.alloc(1, .{ .kernel = true, .cachable = true, .writable = true }) catch |e| {
+        panic(@errorReturnTrace(), "Failed to allocate within the secondary VMM in rt_copyData: {}\n", .{e});
+    } orelse panic(@errorReturnTrace(), "Failed to get an allocation within the secondary VMM in rt_copyData\n", .{});
+    defer vmm2.free(addr) catch |e| {
+        panic(@errorReturnTrace(), "Failed to free the allocation in secondary VMM: {}\n", .{e});
+    };
+
+    const expected_free_entries2 = vmm2.bmp.num_free_entries;
+    const expected_free_pmm_entries = pmm.blocksFree();
+    // Try copying to vmm2
+    var buff: [6]u8 = [_]u8{ 4, 5, 9, 123, 90, 67 };
+    vmm.copyData(&vmm2, buff[0..buff.len], addr, true) catch |e| {
+        panic(@errorReturnTrace(), "Failed to copy data to secondary VMM in rt_copyData: {}\n", .{e});
+    };
+    // Make sure the function cleaned up
+    if (vmm.bmp.num_free_entries != expected_free_entries) {
+        panic(@errorReturnTrace(), "Expected {} free entries in VMM, but there were {}\n", .{ expected_free_entries, vmm.bmp.num_free_entries });
+    }
+    if (vmm2.bmp.num_free_entries != expected_free_entries2) {
+        panic(@errorReturnTrace(), "Expected {} free entries in the secondary VMM, but there were {}\n", .{ expected_free_entries2, vmm2.bmp.num_free_entries });
+    }
+    if (pmm.blocksFree() != expected_free_pmm_entries) {
+        panic(@errorReturnTrace(), "Expected {} free entries in PMM, but there were {}\n", .{ expected_free_pmm_entries, pmm.blocksFree() });
+    }
+
+    // Make sure that the data at the allocated address is correct
+    // Since vmm2 is a mirror of vmm, this address should be mapped by the CPU's MMU
+    const dest_buff = @intToPtr([*]u8, addr)[0..buff.len];
+    if (!std.mem.eql(u8, buff[0..buff.len], dest_buff)) {
+        panic(@errorReturnTrace(), "Data copied to vmm2 doesn't have the expected values\n", .{});
+    }
+
+    // Now try copying the same buffer from vmm2
+    var buff2 = vmm.allocator.alloc(u8, buff.len) catch |e| {
+        panic(@errorReturnTrace(), "Failed to allocate a test buffer in rt_copyData: {}\n", .{e});
+    };
+    vmm.copyData(&vmm2, buff2, addr, false) catch |e| {
+        panic(@errorReturnTrace(), "Failed to copy data from secondary VMM in rt_copyData: {}\n", .{e});
+    };
+    if (!std.mem.eql(u8, buff[0..buff.len], buff2)) {
+        panic(@errorReturnTrace(), "Data copied from vmm2 doesn't have the expected values\n", .{});
+    }
 }

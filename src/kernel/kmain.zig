@@ -1,5 +1,5 @@
 const std = @import("std");
-const logger = std.log.scoped(.kmain);
+const kmain_log = std.log.scoped(.kmain);
 const builtin = @import("builtin");
 const is_test = builtin.is_test;
 const build_options = @import("build_options");
@@ -19,12 +19,13 @@ const scheduler = @import("scheduler.zig");
 const vfs = @import("filesystem/vfs.zig");
 const initrd = @import("filesystem/initrd.zig");
 const keyboard = @import("keyboard.zig");
+const Allocator = std.mem.Allocator;
 
 comptime {
     if (!is_test) {
         switch (builtin.arch) {
             .i386 => _ = @import("arch/x86/boot.zig"),
-            else => {},
+            else => unreachable,
         }
     }
 }
@@ -57,6 +58,8 @@ pub fn log(
     log_root.log(level, "(" ++ @tagName(scope) ++ "): " ++ format, args);
 }
 
+var kernel_heap: heap.FreeListAllocator = undefined;
+
 export fn kmain(boot_payload: arch.BootPayload) void {
     const serial_stream = serial.init(boot_payload);
 
@@ -76,9 +79,15 @@ export fn kmain(boot_payload: arch.BootPayload) void {
         panic_root.panic(@errorReturnTrace(), "Failed to initialise kernel VMM: {}", .{e});
     };
 
-    logger.info("Init arch " ++ @tagName(builtin.arch) ++ "\n", .{});
+    kmain_log.info("Init arch " ++ @tagName(builtin.arch) ++ "\n", .{});
     arch.init(&mem_profile);
-    logger.info("Arch init done\n", .{});
+    kmain_log.info("Arch init done\n", .{});
+
+    // The VMM runtime tests can't happen until the architecture has initialised itself
+    switch (build_options.test_mode) {
+        .Initialisation => vmm.runtimeTests(arch.VmmPayload, kernel_vmm, &mem_profile),
+        else => {},
+    }
 
     // Give the kernel heap 10% of the available memory. This can be fine-tuned as time goes on.
     var heap_size = mem_profile.mem_kb / 10 * 1024;
@@ -86,7 +95,7 @@ export fn kmain(boot_payload: arch.BootPayload) void {
     if (!std.math.isPowerOfTwo(heap_size)) {
         heap_size = std.math.floorPowerOfTwo(usize, heap_size);
     }
-    var kernel_heap = heap.init(arch.VmmPayload, kernel_vmm, vmm.Attributes{ .kernel = true, .writable = true, .cachable = true }, heap_size) catch |e| {
+    kernel_heap = heap.init(arch.VmmPayload, kernel_vmm, vmm.Attributes{ .kernel = true, .writable = true, .cachable = true }, heap_size) catch |e| {
         panic_root.panic(@errorReturnTrace(), "Failed to initialise kernel heap: {}\n", .{e});
     };
 
@@ -97,10 +106,6 @@ export fn kmain(boot_payload: arch.BootPayload) void {
     if (arch_kb) |kb| {
         keyboard.addKeyboard(kb) catch |e| panic_root.panic(@errorReturnTrace(), "Failed to add architecture keyboard: {}\n", .{e});
     }
-
-    scheduler.init(&kernel_heap.allocator) catch |e| {
-        panic_root.panic(@errorReturnTrace(), "Failed to initialise scheduler: {}\n", .{e});
-    };
 
     // Get the ramdisk module
     const rd_module = for (mem_profile.modules) |module| {
@@ -117,7 +122,6 @@ export fn kmain(boot_payload: arch.BootPayload) void {
         var ramdisk_filesystem = initrd.InitrdFS.init(&initrd_stream, &kernel_heap.allocator) catch |e| {
             panic_root.panic(@errorReturnTrace(), "Failed to initialise ramdisk: {}\n", .{e});
         };
-        defer ramdisk_filesystem.deinit();
 
         // Can now free the module as new memory is allocated for the ramdisk filesystem
         kernel_vmm.free(module.region.start) catch |e| {
@@ -126,23 +130,25 @@ export fn kmain(boot_payload: arch.BootPayload) void {
 
         // Need to init the vfs after the ramdisk as we need the root node from the ramdisk filesystem
         vfs.setRoot(ramdisk_filesystem.root_node);
-
-        // Load all files here
     }
 
+    scheduler.init(&kernel_heap.allocator, &mem_profile) catch |e| {
+        panic_root.panic(@errorReturnTrace(), "Failed to initialise scheduler: {}\n", .{e});
+    };
+
     // Initialisation is finished, now does other stuff
-    logger.info("Init\n", .{});
+    kmain_log.info("Init\n", .{});
 
     // Main initialisation finished so can enable interrupts
     arch.enableInterrupts();
 
-    logger.info("Creating init2\n", .{});
+    kmain_log.info("Creating init2\n", .{});
 
     // Create a init2 task
-    var idle_task = task.Task.create(initStage2, &kernel_heap.allocator) catch |e| {
+    var stage2_task = task.Task.create(@ptrToInt(initStage2), true, kernel_vmm, &kernel_heap.allocator) catch |e| {
         panic_root.panic(@errorReturnTrace(), "Failed to create init stage 2 task: {}\n", .{e});
     };
-    scheduler.scheduleTask(idle_task, &kernel_heap.allocator) catch |e| {
+    scheduler.scheduleTask(stage2_task, &kernel_heap.allocator) catch |e| {
         panic_root.panic(@errorReturnTrace(), "Failed to schedule init stage 2 task: {}\n", .{e});
     };
 
@@ -169,9 +175,17 @@ fn initStage2() noreturn {
 
     tty.print("Hello Pluto from kernel :)\n", .{});
 
+    const devices = arch.getDevices(&kernel_heap.allocator) catch |e| {
+        panic_root.panic(@errorReturnTrace(), "Unable to get device list: {}\n", .{e});
+    };
+
+    for (devices) |device| {
+        device.print();
+    }
+
     switch (build_options.test_mode) {
         .Initialisation => {
-            logger.info("SUCCESS\n", .{});
+            kmain_log.info("SUCCESS\n", .{});
         },
         else => {},
     }
